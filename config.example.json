@@ -1,22 +1,54 @@
 {
   "products": [
     {
-      "id": "product-1",
+      "id": "my-product",
       "name": "Product name",
       "short_name": "the product",
       "url": "https://store.example.com/product",
       "emoji": "🎮",
+      "type": "restock",
       "is_test": false,
       "primary": true
+    }
+  ],
+  "watches": [
+    {
+      "id": "movie-tickets",
+      "name": "Movie tickets",
+      "url": "https://www.example.com/movie",
+      "emoji": "🎟️",
+      "type": "text_appears",
+      "text": "Buy tickets",
+      "cooldown": 3600
     },
     {
-      "id": "product-2",
-      "name": "Another product",
-      "short_name": "the other product",
-      "url": "https://store.example.com/another",
-      "emoji": "⚔️",
-      "is_test": false,
-      "primary": false
+      "id": "hotel-available",
+      "name": "Hotel night",
+      "url": "https://www.example.com/hotel",
+      "emoji": "🏨",
+      "type": "text_disappears",
+      "text": "Sold out",
+      "cooldown": 3600
+    },
+    {
+      "id": "flight-price",
+      "name": "Flight price",
+      "url": "https://www.example.com/flight",
+      "emoji": "✈️",
+      "type": "price_below",
+      "threshold": 400,
+      "currency": "USD",
+      "selector": ".price",
+      "cooldown": 3600
+    },
+    {
+      "id": "release-page",
+      "name": "Release date page",
+      "url": "https://www.example.com/release",
+      "emoji": "📅",
+      "type": "changed",
+      "selector": "#release-date",
+      "cooldown": 1800
     }
   ]
 }

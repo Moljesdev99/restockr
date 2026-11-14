@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -90,7 +91,7 @@ DEFAULT_PRODUCTS = [
     {
         "id": "chromatic",
         "name": "Game Boy Chromatic Codex",
-        "short_name": "la Chromatic Codex",
+        "short_name": "the Chromatic Codex",
         "url": "https://openai.com/supply/co-lab/chromatic/",
         "emoji": "🎮",
         "is_test": False,
@@ -99,7 +100,7 @@ DEFAULT_PRODUCTS = [
     {
         "id": "disney-ezra",
         "name": "Ezra Legacy Lightsaber Set",
-        "short_name": "el Ezra Legacy Lightsaber Set",
+        "short_name": "the Ezra Legacy Lightsaber Set",
         "url": "https://www.disneystore.com/ezra-legacy-lightsaber-set-star-wars-rebels-limited-edition-418149061750.html",
         "emoji": "⚔️",
         "is_test": True,
@@ -122,15 +123,68 @@ PRODUCT_STATE_KEYS = (
 )
 
 
+RESTOCK_TYPES = {"restock", "product", "stock", ""}
+GENERIC_TYPES = {
+    "text_appears": "text_appears",
+    "text-appears": "text_appears",
+    "appears": "text_appears",
+    "text_disappears": "text_disappears",
+    "text-disappears": "text_disappears",
+    "disappears": "text_disappears",
+    "price_below": "price_below",
+    "price-below": "price_below",
+    "price": "price_below",
+    "changed": "changed",
+    "change": "changed",
+    "hash": "changed",
+    "content": "changed",
+}
+
+
+def entry_type(entry: dict | None) -> str:
+    raw = ((entry or {}).get("type") or "restock")
+    t = str(raw).strip().lower()
+    if t in RESTOCK_TYPES:
+        return "restock"
+    if t in GENERIC_TYPES:
+        return GENERIC_TYPES[t]
+    return t
+
+
+def is_restock(entry: dict | None) -> bool:
+    return entry_type(entry) == "restock"
+
+
+def _param(entry: dict, *keys, default=None):
+    """Read a watch parameter from params/parameters, then the entry itself."""
+    params = (entry.get("params") or entry.get("parameters") or {}) if entry else {}
+    reserved = {
+        "id", "name", "short_name", "url", "emoji", "is_test", "primary",
+        "type", "params", "parameters", "image", "image_url", "cooldown",
+        "button_text",
+    }
+    for k in keys:
+        if isinstance(params, dict) and k in params and params[k] is not None:
+            return params[k]
+        if entry and k in entry and entry[k] is not None and k not in reserved:
+            return entry[k]
+    return default
+
+
 def load_config() -> dict:
     cfg = json.loads(CONFIG_PATH.read_text())
     if not cfg.get("topic"):
         raise SystemExit("config.json missing topic")
     products = cfg.get("products")
+    watches = cfg.get("watches") or []
     if not products:
-        products = json.loads(json.dumps(DEFAULT_PRODUCTS))
-        if cfg.get("product_url"):
-            products[0]["url"] = cfg["product_url"]
+        if watches:
+            products = []
+        else:
+            products = json.loads(json.dumps(DEFAULT_PRODUCTS))
+            if cfg.get("product_url"):
+                products[0]["url"] = cfg["product_url"]
+    products = list(products or []) + list(watches)
     # Normalize
     out = []
     for i, p in enumerate(products):
@@ -142,6 +196,20 @@ def load_config() -> dict:
         p.setdefault("emoji", "🎮")
         p.setdefault("is_test", False)
         p.setdefault("primary", i == 0)
+        p["type"] = entry_type(p)
+        if p["type"] not in {"restock", "text_appears", "text_disappears", "price_below", "changed"}:
+            raise SystemExit(f"config product {i} ({p['id']}): unknown type {p.get('type')!r}")
+        params = p.get("params") if isinstance(p.get("params"), dict) else None
+        if params is None and isinstance(p.get("parameters"), dict):
+            params = p.get("parameters")
+        p["params"] = params or {}
+        if p.get("image") and not p.get("image_url"):
+            p["image_url"] = p["image"]
+        if p.get("cooldown") is not None and p.get("cooldown") != "":
+            try:
+                p["cooldown"] = int(p["cooldown"])
+            except (TypeError, ValueError):
+                raise SystemExit(f"config product {i} ({p['id']}): cooldown must be seconds (integer)")
         out.append(p)
     if not any(p.get("primary") for p in out):
         out[0]["primary"] = True
@@ -347,20 +415,7 @@ _MONTHS_ES = {
     "dec": "diciembre",
 }
 
-# Official page copy → brief Spanish one-liner
-_DESC_ES = {
-    "create your own games with codex, load them onto a cartridge, and play on a handheld":
-        "Crea tus propios juegos con Codex, cárgalos en un cartucho y júegalos en esta portátil.",
-    "create your own games with codex":
-        "Crea tus propios juegos con Codex, cárgalos en un cartucho y júegalos en esta portátil.",
-    "limited edition ezra lightsaber hilt set":
-        "Set limitado con dos empuñaduras Legacy de Ezra Bridger, con sonido e iluminación.",
-    "ezra lightsaber hilt set featuring two":
-        "Set limitado con dos empuñaduras Legacy de Ezra Bridger, con sonido e iluminación.",
-}
-
-
-def format_date_es(raw: str | None) -> str | None:
+def format_date(raw: str | None) -> str | None:
     if not raw:
         return None
     text = raw.strip()
@@ -376,29 +431,50 @@ def format_date_es(raw: str | None) -> str | None:
     )
     if not m:
         return text
-    month = _MONTHS_ES.get(m.group(1).lower().rstrip("."))
-    if not month:
+    full = {
+        "jan": "January", "january": "January",
+        "feb": "February", "february": "February",
+        "mar": "March", "march": "March",
+        "apr": "April", "april": "April",
+        "may": "May",
+        "jun": "June", "june": "June",
+        "jul": "July", "july": "July",
+        "aug": "August", "august": "August",
+        "sep": "September", "sept": "September", "september": "September",
+        "oct": "October", "october": "October",
+        "nov": "November", "november": "November",
+        "dec": "December", "december": "December",
+    }
+    name = full.get(m.group(1).lower().rstrip("."))
+    if not name:
         return text
-    return f"{int(m.group(2))} de {month}"
+    return f"{name} {int(m.group(2))}"
+
+
+# Back-compat alias (older call sites)
+format_date_es = format_date
 
 
 def status_label(status: str | None, expected: str | None) -> str:
     if status == "in_stock":
-        return "Disponible"
+        return "In stock"
     if status == "out_of_stock" and expected:
-        return "Próximamente"
+        return "Coming soon"
     if status == "out_of_stock":
-        return "Agotado"
-    return "Por confirmar"
+        return "Sold out"
+    if status == "triggered":
+        return "Condition met"
+    if status == "idle":
+        return "Waiting"
+    if status == "changed":
+        return "Content changed"
+    return "To be confirmed"
 
 
 def describe_es(english: str | None) -> str | None:
+    """Shorten official page copy for the alert card. Keeps English."""
     if not english:
         return None
-    low = english.lower()
-    for needle, es in _DESC_ES.items():
-        if needle in low:
-            return es
     one = re.sub(r"\s+", " ", english).strip()
     if len(one) > 140:
         one = one[:137].rsplit(" ", 1)[0] + "…"
@@ -586,13 +662,13 @@ def card_headline(
     emoji = product.get("emoji") or "🎮"
     short = product.get("short_name") or name
     if status == "in_stock":
-        head = f"🟢 ¡Ya hay stock de {short}!"
+        head = f"🟢 {short} is in stock!"
     elif event_line:
         head = re.sub(r"</?b>", "", event_line)
     else:
         head = f"{emoji} {name}"
     if test and not head.startswith("🧪"):
-        return f"🧪 Prueba · {head}"
+        return f"🧪 Test · {head}"
     return head
 
 
@@ -610,21 +686,22 @@ def build_caption(
     state = state or {}
     status = info.get("status") or state.get("last_status")
     expected = info.get("expected") or state.get("last_expected_restock")
-    price = info.get("price") or state.get("product_price") or "Por confirmar"
-    description = info.get("description") or state.get("product_description")
+    price = info.get("price") or state.get("product_price") or "To be confirmed"
+    description = info.get("description") or state.get("product_description") or info.get("snippet")
     estado = status_label(status, expected)
-    fecha = format_date_es(expected)
-    name = product.get("name") or "Producto"
+    fecha = format_date(expected)
+    name = product.get("name") or "Watch"
     emoji = product.get("emoji") or "🎮"
     short = product.get("short_name") or name
     url = product.get("url") or PRODUCT_URL
     test = is_test or bool(product.get("is_test"))
+    restock = is_restock(product)
 
     lines: list[str] = []
     if test:
-        lines.append(f"🧪 {_bold('Prueba', markup)}")
+        lines.append(f"🧪 {_bold('Test', markup)}")
     if status == "in_stock":
-        lines.append(f"🟢 {_bold(f'¡Ya hay stock de {short}!', markup)}")
+        lines.append(f"🟢 {_bold(f'{short} is in stock!', markup)}")
     elif event_line:
         # event_line is stored as HTML; convert if needed
         ev = event_line
@@ -635,15 +712,41 @@ def build_caption(
     if description:
         lines.append(f"✨ {_esc(description, markup)}")
     lines.append("")
-    lines.append(f"📦 {_bold('Estado:', markup)} {_esc(estado, markup)}")
-    if fecha:
-        lines.append(f"📅 {_bold('Fecha prevista:', markup)} {_esc(fecha, markup)}")
-    elif status != "in_stock":
-        lines.append(f"📅 {_bold('Fecha prevista:', markup)} Por confirmar")
-    lines.append(f"💵 {_bold('Precio:', markup)} {_esc(price, markup)}")
+    lines.append(f"📦 {_bold('Status:', markup)} {_esc(estado, markup)}")
+    if restock:
+        if fecha:
+            lines.append(f"📅 {_bold('Expected date:', markup)} {_esc(fecha, markup)}")
+        elif status != "in_stock":
+            lines.append(f"📅 {_bold('Expected date:', markup)} To be confirmed")
+    if price and price != "To be confirmed":
+        lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")
+    elif restock:
+        lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")
     lines.append("")
     lines.append(f"🔗 {url}")
     return "\n".join(lines)
+
+
+def button_label(product: dict | None = None) -> str:
+    product = product or {}
+    custom = product.get("button_text")
+    if custom:
+        return str(custom)
+    if is_restock(product):
+        return "🛒 View product"
+    return "🔗 Open page"
+
+
+def entry_image(product: dict | None = None, info: dict | None = None, pstate: dict | None = None) -> str | None:
+    info = info or {}
+    pstate = pstate or {}
+    product = product or {}
+    return (
+        info.get("image_url")
+        or product.get("image")
+        or product.get("image_url")
+        or pstate.get("product_image_url")
+    )
 
 
 def _download_image(url: str) -> bytes | None:
@@ -678,10 +781,10 @@ def tg_send_card(
     )
     if len(caption) > 1024:
         caption = caption[:1020] + "…"
-    image_url = info.get("image_url") or state.get("product_image_url")
+    image_url = entry_image(product, info, state)
     url = product.get("url") or PRODUCT_URL
     markup = json.dumps(
-        {"inline_keyboard": [[{"text": "🛒 Ver producto", "url": url}]]},
+        {"inline_keyboard": [[{"text": button_label(product), "url": url}]]},
         ensure_ascii=False,
     )
     fields = {
@@ -761,7 +864,7 @@ def ntfy(
         payload["actions"] = [
             {
                 "action": "view",
-                "label": action_label or "🛒 Ver producto",
+                "label": action_label or "🛒 View product",
                 "url": click,
                 "clear": True,
             }
@@ -815,7 +918,7 @@ def ntfy_card(
         event_line=event_line,
         markup="md",
     )
-    image_url = info.get("image_url") or pstate.get("product_image_url")
+    image_url = entry_image(product, info, pstate)
     url = product.get("url") or PRODUCT_URL
     return ntfy(
         cfg,
@@ -826,7 +929,7 @@ def ntfy_card(
         click=url,
         attach=image_url,
         markdown=True,
-        action_label="🛒 Ver producto",
+        action_label=button_label(product),
     )
 
 
@@ -1025,6 +1128,341 @@ def _visible_from_html(html: str) -> str:
     return re.sub(r"\s+", " ", cut)
 
 
+def _select_with_bs4(html: str, selector: str) -> str:
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+    except ImportError:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        parts = [el.get_text(" ", strip=True) for el in soup.select(selector)]
+        return "\n".join(p for p in parts if p)
+    except Exception:
+        return ""
+
+
+def _simple_select(html: str, selector: str) -> str:
+    """Very small CSS subset used when BeautifulSoup is unavailable: #id, .class, tag, [attr=value]."""
+    sel = (selector or "").strip()
+    if not sel:
+        return ""
+    html = html or ""
+    pieces: list[str] = []
+    for part in sel.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        attr_m = re.fullmatch(
+            r'(?:([A-Za-z][\w-]*)|#([A-Za-z_][\w-]*)|\.([A-Za-z_][\w-]*))?(?:\[([A-Za-z_][\w-]*)(?:=["\']?([^"\'\]]+)["\']?)?\])?',
+            part,
+        )
+        if not attr_m:
+            continue
+        tag, id_, cls, attr, aval = attr_m.groups()
+        pattern = r"<([A-Za-z][A-Za-z0-9]*)([^>]*)>(.*?)</\1>"
+        for m in re.finditer(pattern, html, re.I | re.S):
+            attrs = m.group(2)
+            inner = m.group(3)
+            if tag and m.group(1).lower() != tag.lower():
+                continue
+            if id_ and not re.search(
+                rf'\bid\s*=\s*["\']{re.escape(id_)}["\']', attrs, re.I
+            ):
+                continue
+            if cls and not re.search(
+                rf'\bclass\s*=\s*["\'][^"\']*\b{re.escape(cls)}\b[^"\']*["\']',
+                attrs,
+                re.I,
+            ):
+                continue
+            if attr:
+                if aval is None:
+                    if not re.search(rf"\b{re.escape(attr)}\b", attrs, re.I):
+                        continue
+                elif not re.search(
+                    rf'''\b{re.escape(attr)}\s*=\s*["']?{re.escape(aval)}["']?''',
+                    attrs,
+                    re.I,
+                ):
+                    continue
+            cut = re.sub(r"<[^>]+>", " ", inner)
+            pieces.append(re.sub(r"\s+", " ", cut).strip())
+    return "\n".join(p for p in pieces if p)
+
+
+def select_text(html: str, selector: str) -> str:
+    if not selector:
+        return ""
+    found = _select_with_bs4(html, selector)
+    if found:
+        return found
+    return _simple_select(html, selector)
+
+
+def parse_price(raw) -> float | None:
+    if raw is None or raw is False:
+        return None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw)
+    s = htmlmod.unescape(str(raw)).replace("\xa0", " ").strip()
+    if not s:
+        return None
+    s = s.replace(",", "")
+    m = re.search(
+        r"(?:USD|EUR|GBP|CAD|MXN|US)?\s*[\$€£]\s*(\d+(?:\.\d{1,2})?)"
+        r"|(\d+(?:\.\d{1,2})?)\s*(?:USD|EUR|GBP|CAD|MXN)"
+        r"|(?<![\d.])(\d+(?:\.\d{1,2})?)(?!\d)",
+        s,
+        re.I,
+    )
+    if not m:
+        return None
+    num = next(g for g in m.groups() if g)
+    try:
+        return float(num)
+    except ValueError:
+        return None
+
+
+def _walk_jsonld_prices(node, out: list[float]) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _walk_jsonld_prices(item, out)
+        return
+    if not isinstance(node, dict):
+        return
+    for key in ("price", "lowPrice", "highPrice", "value"):
+        if key in node:
+            p = parse_price(node.get(key))
+            if p is not None:
+                out.append(p)
+    offer = node.get("offers") or node.get("Offers")
+    if offer is not None:
+        _walk_jsonld_prices(offer, out)
+    for v in node.values():
+        if isinstance(v, (dict, list)):
+            _walk_jsonld_prices(v, out)
+
+
+def prices_from_jsonld(html: str) -> list[float]:
+    prices: list[float] = []
+    for m in re.finditer(
+        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html or "",
+        re.I | re.S,
+    ):
+        raw = htmlmod.unescape(m.group(1)).strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        _walk_jsonld_prices(data, prices)
+    seen: set[float] = set()
+    out: list[float] = []
+    for p in prices:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def format_money(amount: float | None, currency: str | None = None) -> str:
+    if amount is None:
+        return "To be confirmed"
+    cur = (currency or "USD").upper()
+    prefix = {"USD": "US$", "EUR": "€", "GBP": "£", "MXN": "MX$", "CAD": "CA$"}.get(
+        cur, cur + " "
+    )
+    return f"{prefix}{amount:.2f}"
+
+
+def _scoped(html: str, visible: str, entry: dict) -> tuple[str, str]:
+    sel = _param(entry, "selector", "css")
+    if not sel:
+        return html or "", visible or ""
+    text = select_text(html, sel)
+    return html or "", text or ""
+
+
+def _needle_present(html: str, visible: str, entry: dict) -> tuple[bool, str]:
+    scoped_html, scoped_vis = _scoped(html, visible, entry)
+    case = bool(_param(entry, "case_sensitive", default=False))
+    flags = 0 if case else re.I
+    pattern = _param(entry, "pattern", "regex")
+    if pattern:
+        try:
+            m = re.search(pattern, scoped_vis, flags) or re.search(
+                pattern, scoped_html, flags
+            )
+        except re.error as exc:
+            raise RuntimeError(
+                f"Invalid regex in watch {entry.get('id')}: {exc}"
+            ) from exc
+        return (True, m.group(0)[:200]) if m else (False, "")
+    raw = _param(entry, "text", "texts")
+    if raw is None:
+        raise RuntimeError(
+            f"Watch {entry.get('id')} ({entry_type(entry)}) needs 'text' or 'pattern'"
+        )
+    texts = [raw] if isinstance(raw, str) else [str(x) for x in raw]
+    hay_vis = scoped_vis if case else scoped_vis.lower()
+    hay_html = scoped_html if case else scoped_html.lower()
+    for t in texts:
+        if not t:
+            continue
+        needle = t if case else t.lower()
+        if needle in hay_vis or needle in hay_html:
+            return True, t
+    return False, ""
+
+
+def extract_watch_price(html: str, visible: str, entry: dict) -> float | None:
+    scoped_html, scoped_vis = _scoped(html, visible, entry)
+    pattern = _param(entry, "pattern", "regex")
+    if pattern:
+        flags = 0 if _param(entry, "case_sensitive", default=False) else re.I
+        try:
+            m = re.search(pattern, scoped_vis, flags) or re.search(
+                pattern, scoped_html, flags
+            )
+        except re.error as exc:
+            raise RuntimeError(
+                f"Invalid regex in watch {entry.get('id')}: {exc}"
+            ) from exc
+        if m:
+            grp = m.group(1) if m.lastindex else m.group(0)
+            p = parse_price(grp)
+            if p is not None:
+                return p
+    if _param(entry, "jsonld", default=True):
+        found = prices_from_jsonld(html)
+        if found:
+            return min(found)
+    if _param(entry, "selector", "css") and scoped_vis:
+        p = parse_price(scoped_vis)
+        if p is not None:
+            return p
+    labeled = extract_price(html, visible)
+    p = parse_price(labeled) if labeled else None
+    if p is not None:
+        return p
+    return parse_price(scoped_vis or visible)
+
+
+def _hash_text(text: str, ignore) -> str:
+    value = text or ""
+    if ignore:
+        patterns = [ignore] if isinstance(ignore, str) else list(ignore)
+        for pat in patterns:
+            try:
+                value = re.sub(pat, " ", value, flags=re.I)
+            except re.error:
+                value = value.replace(str(pat), " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def evaluate_generic(title: str, html: str, visible: str, entry: dict) -> dict:
+    """Evaluate a non-restock watch against already-fetched HTML."""
+    kind = entry_type(entry)
+    image_url = extract_image_url(html) or entry.get("image") or entry.get("image_url")
+    info: dict = {
+        "status": "idle",
+        "watch_type": kind,
+        "triggered": False,
+        "product_ok": True,
+        "title": title,
+        "image_url": image_url,
+        "description": None,
+        "price": None,
+        "expected": None,
+        "snippet": None,
+        "content_hash": None,
+        "matched_text": None,
+        "threshold": None,
+        "price_value": None,
+    }
+    if kind in ("text_appears", "text_disappears"):
+        present, matched = _needle_present(html, visible, entry)
+        triggered = present if kind == "text_appears" else (not present)
+        info["triggered"] = triggered
+        info["status"] = "triggered" if triggered else "idle"
+        info["matched_text"] = matched or _param(entry, "text", "pattern", "regex")
+        info["snippet"] = (matched or "")[:200] or None
+        return info
+    if kind == "price_below":
+        threshold = _param(entry, "threshold", "below", "max_price")
+        if threshold is None:
+            raise RuntimeError(f"Watch {entry.get('id')} (price_below) needs a 'threshold'")
+        threshold = parse_price(threshold)
+        if threshold is None:
+            raise RuntimeError(f"Watch {entry.get('id')}: invalid price threshold")
+        inclusive = bool(_param(entry, "inclusive", default=True))
+        amount = extract_watch_price(html, visible, entry)
+        if amount is None:
+            raise RuntimeError(f"Could not find a price on the page ({entry.get('id')})")
+        triggered = amount <= threshold if inclusive else amount < threshold
+        currency = _param(entry, "currency")
+        info["triggered"] = triggered
+        info["status"] = "triggered" if triggered else "idle"
+        info["price_value"] = amount
+        info["threshold"] = threshold
+        info["price"] = format_money(amount, currency)
+        info["snippet"] = (
+            f"{format_money(amount, currency)} "
+            f"(threshold {format_money(threshold, currency)})"
+        )
+        return info
+    if kind == "changed":
+        _, scoped_vis = _scoped(html, visible, entry)
+        basis = scoped_vis if _param(entry, "selector", "css") else (visible or "")
+        digest = _hash_text(basis, _param(entry, "ignore", "strip"))
+        info["content_hash"] = digest
+        info["snippet"] = (basis or "")[:200] or None
+        info["status"] = "idle"
+        info["triggered"] = False
+        return info
+    raise RuntimeError(f"Unknown watch type {kind!r} ({entry.get('id')})")
+
+
+def generic_event_line(entry: dict, info: dict) -> str:
+    kind = entry_type(entry)
+    if kind == "text_appears":
+        needle = info.get("matched_text") or _param(entry, "text") or "the expected text"
+        return f"🟢 <b>“{_esc(str(needle), 'html')}” is now on the page</b>"
+    if kind == "text_disappears":
+        needle = info.get("matched_text") or _param(entry, "text") or "the expected text"
+        return f"🟢 <b>“{_esc(str(needle), 'html')}” is no longer on the page</b>"
+    if kind == "price_below":
+        price = info.get("price") or "the current price"
+        thr = format_money(info.get("threshold"), _param(entry, "currency"))
+        return f"🟢 <b>Price is {htmlmod.escape(str(price))} (threshold {htmlmod.escape(thr)})</b>"
+    if kind == "changed":
+        return "🔔 <b>The page content changed</b>"
+    return f"🔔 <b>{htmlmod.escape(entry.get('name') or 'Watch')} needs your attention</b>"
+
+
+def evaluate_page(title: str, html: str, visible: str, product: dict) -> dict:
+    """Shared evaluation after a page has been fetched."""
+    product = _prod(product)
+    if looks_like_challenge(title, html, visible, product):
+        raise RuntimeError(
+            f"Cloudflare/challenge page (product={product.get('id')}, title={title!r})"
+        )
+    if is_restock(product):
+        info = extract(title, html, visible, product)
+        if not info["product_ok"]:
+            raise RuntimeError(
+                f"Product content not found (product={product.get('id')}, "
+                f"title={title!r}, len_html={len(html)})"
+            )
+        return info
+    return evaluate_generic(title, html, visible, product)
+
+
+
 def check_page(product: dict | None = None, _context=None) -> dict:
     """Load the product page with headless Chrome --dump-dom (the method that
     already succeeded on this box past Cloudflare). Each check starts and
@@ -1063,24 +1501,16 @@ def check_page(product: dict | None = None, _context=None) -> dict:
         raise RuntimeError(f"Chrome exit {proc.returncode} ({product.get('id')}): {err}")
     title = _title_from_html(html)
     visible = _visible_from_html(html)
-    if looks_like_challenge(title, html, visible, product):
-        raise RuntimeError(
-            f"Cloudflare/challenge page (product={product.get('id')}, title={title!r})"
-        )
-    info = extract(title, html, visible, product)
-    if not info["product_ok"]:
-        raise RuntimeError(
-            f"Product content not found (product={product.get('id')}, "
-            f"title={title!r}, len_html={len(html)})"
-        )
-    return info
+    return evaluate_page(title, html, visible, product)
 
 
 def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: str) -> None:
     n = now_mx()
-    # Chromatic-only Nov 19 heads-up
-    if product.get("primary") and (
-        not state.get("nov19_heads_up_sent")
+    # Primary restock product only: Nov 19 heads-up
+    if (
+        product.get("primary")
+        and is_restock(product)
+        and not state.get("nov19_heads_up_sent")
         and n.date() == NOV19.date()
         and n >= NOV19
     ):
@@ -1088,14 +1518,14 @@ def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: 
             cfg,
             product,
             pstate=pstate,
-            event_line="⏰ <b>Hoy es el restock</b>",
+            event_line="⏰ <b>Restock is today</b>",
             priority=4,
             tags=["alarm_clock", "gameboy"],
         )
         tg_send_card(
             state=pstate,
             product=product,
-            event_line="⏰ <b>Hoy es el restock</b>",
+            event_line="⏰ <b>Restock is today</b>",
         )
         state["nov19_heads_up_sent"] = True
         save_state(state)
@@ -1113,19 +1543,129 @@ def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: 
     ):
         ntfy(
             cfg,
-            title="☁️ Vigilante en la nube activo",
-            message="Vigilante en la nube activo, sin stock aún.",
+            title="☁️ Cloud watcher is active",
+            message="Cloud watcher is active, no stock yet.",
             priority=3,
             tags=["green_heart"],
         )
-        tg_send("☁️ Vigilante en la nube activo, sin stock aún.")
+        tg_send("☁️ Cloud watcher is active, no stock yet.")
         dates = list(state.get("heartbeat_dates", []))
         dates.append(today)
         state["heartbeat_dates"] = dates[-30:]
         save_state(state)
 
 
+def _generic_due(product: dict, pstate: dict) -> bool:
+    """True when a repeat alert is allowed because cooldown has elapsed."""
+    cooldown = product.get("cooldown")
+    if not cooldown:
+        return False
+    last = pstate.get("last_generic_alert_ts")
+    if not last:
+        return True
+    try:
+        previous = datetime.fromisoformat(str(last))
+        if previous.tzinfo is None:
+            previous = previous.replace(tzinfo=TZ)
+        return (now_mx() - previous).total_seconds() >= float(cooldown)
+    except Exception:
+        return True
+
+
+def handle_generic(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    pstate = product_state(state, product)
+    kind = entry_type(product)
+    triggered = bool(info.get("triggered"))
+    pstate["consecutive_failures"] = 0
+    pstate["successful_checks"] = int(pstate.get("successful_checks") or 0) + 1
+    cache_product_fields(pstate, info)
+
+    if info.get("content_hash"):
+        prev_hash = pstate.get("last_content_hash")
+        if kind == "changed" and pstate.get("watch_baseline_set") and prev_hash and prev_hash != info["content_hash"]:
+            triggered = True
+            info["triggered"] = True
+            info["status"] = "changed"
+        pstate["last_content_hash"] = info["content_hash"]
+
+    first = not pstate.get("watch_baseline_set")
+    should_alert = False
+    if first:
+        should_alert = False
+    elif kind == "changed":
+        should_alert = triggered and (
+            not product.get("cooldown") or _generic_due(product, pstate)
+        )
+    else:
+        was = bool(pstate.get("last_watch_triggered"))
+        if triggered and not was:
+            should_alert = True
+        elif triggered and was and _generic_due(product, pstate):
+            should_alert = True
+
+    log.info(
+        "CHECK OK  product=%s  type=%s  status=%s  triggered=%s  first=%s  alert=%s  price=%s",
+        product.get("id"),
+        kind,
+        info.get("status"),
+        triggered,
+        first,
+        should_alert,
+        info.get("price") or "-",
+    )
+
+    if should_alert:
+        line = generic_event_line(product, info)
+        ntfy_card(
+            cfg,
+            product,
+            info,
+            pstate,
+            is_test=bool(product.get("is_test")),
+            event_line=line,
+            priority=5 if triggered else 4,
+            tags=["bell", "warning"],
+        )
+        tg_send_card(
+            info,
+            pstate,
+            product=product,
+            is_test=bool(product.get("is_test")),
+            event_line=line,
+        )
+        pstate["last_generic_alert_ts"] = now_mx().isoformat()
+
+    pstate["watch_baseline_set"] = True
+    pstate["last_watch_triggered"] = triggered
+    if info.get("price_value") is not None:
+        pstate["last_watch_price"] = info["price_value"]
+    if info.get("snippet"):
+        pstate["last_watch_snippet"] = info["snippet"]
+    if pstate.get("blocked_warning_sent"):
+        ntfy(
+            cfg,
+            title=f"✅ Watcher recovered ({product.get('name')})",
+            message=(
+                f"I could read “{product.get('name')}” again. "
+                f"Status: {status_label(info.get('status'), None)}."
+            ),
+            priority=4,
+            tags=["white_check_mark"],
+        )
+        tg_send(
+            f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the page')}” again. "
+            f"Status: {htmlmod.escape(status_label(info.get('status'), None))}."
+        )
+        pstate["blocked_warning_sent"] = False
+    sync_primary_state(state, product, pstate)
+    save_state(state)
+    maybe_specials(cfg, state, product, pstate, info.get("status") or "idle")
+
+
 def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    if not is_restock(product):
+        handle_generic(cfg, state, product, info)
+        return
     pstate = product_state(state, product)
     status = info["status"]
     expected = info.get("expected")
@@ -1165,7 +1705,7 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
             info,
             pstate,
             is_test=always_test,
-            event_line="📅 <b>Cambió la fecha de restock</b>",
+            event_line="📅 <b>Restock date changed</b>",
             priority=4,
             tags=["calendar", "warning"],
         )
@@ -1174,7 +1714,7 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
             pstate,
             product=product,
             is_test=always_test,
-            event_line="📅 <b>Cambió la fecha de restock</b>",
+            event_line="📅 <b>Restock date changed</b>",
         )
 
     if status == "in_stock":
@@ -1212,7 +1752,7 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
             info,
             pstate,
             is_test=always_test,
-            event_line="⚪ <b>Se agotó de nuevo</b>",
+            event_line="⚪ <b>Sold out again</b>",
             priority=4,
             tags=["white_circle", "shopping"],
         )
@@ -1221,7 +1761,7 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
             pstate,
             product=product,
             is_test=always_test,
-            event_line="⚪ <b>Se agotó de nuevo</b>",
+            event_line="⚪ <b>Sold out again</b>",
         )
         pstate["in_stock_alerts_sent"] = 0
         pstate["last_in_stock_alert_ts"] = None
@@ -1235,17 +1775,17 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
     if pstate.get("blocked_warning_sent"):
         ntfy(
             cfg,
-            title=f"✅ Vigilante recuperado ({product.get('name')})",
+            title=f"✅ Watcher recovered ({product.get('name')})",
             message=(
-                f"Ya pude leer «{product.get('name')}» otra vez. "
-                f"Estado: {'con stock' if status == 'in_stock' else 'sin stock aún'}."
+                f"I could read “{product.get('name')}” again. "
+                f"Status: {'in stock' if status == 'in_stock' else 'still out of stock'}."
             ),
             priority=4,
             tags=["white_check_mark"],
         )
         tg_send(
-            f"✅ Vigilante recuperado. Ya pude leer «{htmlmod.escape(product.get('name') or 'el producto')}» otra vez. "
-            f"Estado: {'con stock' if status == 'in_stock' else 'sin stock aún'}."
+            f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the product')}” again. "
+            f"Status: {'in stock' if status == 'in_stock' else 'still out of stock'}."
         )
         pstate["blocked_warning_sent"] = False
     sync_primary_state(state, product, pstate)
@@ -1268,17 +1808,17 @@ def handle_failure(cfg: dict, state: dict, product: dict, err: str) -> float:
     ):
         ntfy(
             cfg,
-            title=f"⚠️ Vigilante bloqueado ({product.get('name')})",
+            title=f"⚠️ Watcher blocked ({product.get('name')})",
             message=(
-                f"No pude leer «{product.get('name')}» {n} veces seguidas "
-                "(posible Cloudflare u otro bloqueo). Sigo reintentando."
+                f"I could not read “{product.get('name')}” {n} times in a row "
+                "(possible block). I will keep retrying."
             ),
             priority=4,
             tags=["warning"],
         )
         tg_send(
-            f"⚠️ No pude leer «{htmlmod.escape(product.get('name') or 'el producto')}» "
-            f"{n} veces seguidas (posible bloqueo). Sigo reintentando."
+            f"⚠️ I could not read “{htmlmod.escape(product.get('name') or 'the page')}” "
+            f"{n} times in a row (possible block). I will keep retrying."
         )
         pstate["blocked_warning_sent"] = True
     sync_primary_state(state, product, pstate)

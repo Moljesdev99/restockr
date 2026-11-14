@@ -96,21 +96,20 @@ def check_page(product: dict | None = None, _context=None) -> dict:
     final_host = urlparse(str(r.url)).netloc.lower()
     # Disney/Queue-it: when the virtual waiting room is ON we end on queue.* host
     if final_host.startswith("queue."):
-        return {"status": "queue", "queue_url": str(r.url), "product_ok": True}
+        if core.is_restock(product):
+            return {"status": "queue", "queue_url": str(r.url), "product_ok": True}
+        raise RuntimeError(f"Waiting-room page ({pid})")
     if r.status_code >= 400:
         _reset_session(pid)
         raise RuntimeError(f"HTTP {r.status_code} ({pid})")
     html = r.text or ""
     title = core._title_from_html(html)
     visible = core._visible_from_html(html)
-    if core.looks_like_challenge(title, html, visible, product):
+    try:
+        return core.evaluate_page(title, html, visible, product)
+    except Exception:
         _reset_session(pid)
-        raise RuntimeError(f"Challenge page ({pid}, title={title!r})")
-    info = core.extract(title, html, visible, product)
-    if not info["product_ok"]:
-        _reset_session(pid)
-        raise RuntimeError(f"Product content not found ({pid}, title={title!r}, len={len(html)})")
-    return info
+        raise
 
 
 core.check_page = check_page
@@ -140,7 +139,7 @@ def handle_queue(cfg: dict, state: dict, product: dict, info: dict) -> None:
     if not pstate.get("queue_active"):
         sent = 0
     if sent < 3 and now - last >= 180:
-        line = "🚦 <b>¡Abrió la fila virtual! Entra ya</b>"
+        line = "🚦 <b>The virtual waiting room is open! Join now</b>"
         core.ntfy_card(cfg, product, pstate=pstate, event_line=line, priority=5,
                        tags=["rotating_light", "shopping"])
         core.tg_send_card(state=pstate, product=product, event_line=line)
@@ -159,20 +158,24 @@ def clear_queue_flag(state: dict, product: dict) -> None:
 
 # ---------- summary (intro / test) ----------
 def summary_text(products, results) -> str:
-    lines = ["☁️ <b>Restockr en la nube: activo</b>", ""]
+    lines = ["☁️ <b>Restockr cloud watcher: active</b>", ""]
     for p in products:
         info = results.get(p["id"])
         name = htmlmod.escape(p.get("name") or p["id"])
         if info is None:
-            lines.append(f"{p.get('emoji','•')} {name}: ⚠️ no pude leer la página")
+            lines.append(f"{p.get('emoji','•')} {name}: ⚠️ could not read the page")
         elif info.get("status") == "queue":
-            lines.append(f"{p.get('emoji','•')} {name}: 🚦 fila virtual abierta")
+            lines.append(f"{p.get('emoji','•')} {name}: 🚦 virtual waiting room is open")
+        elif not core.is_restock(p):
+            st = core.status_label(info.get("status"), None)
+            extra = f" — {htmlmod.escape(info.get('snippet'))}" if info.get("snippet") else ""
+            lines.append(f"{p.get('emoji','•')} {name}: {st}{extra}")
         else:
             st = core.status_label(info.get("status"), info.get("expected"))
-            fecha = core.format_date_es(info.get("expected"))
-            extra = f" (fecha prevista: {fecha})" if fecha else ""
+            fecha = core.format_date(info.get("expected"))
+            extra = f" (expected: {fecha})" if fecha else ""
             lines.append(f"{p.get('emoji','•')} {name}: {st}{extra}")
-    lines += ["", "Reviso cada 1–2 minutos, sin depender de la computadora."]
+    lines += ["", "Checking every 1–2 minutes, independently of this computer."]
     return "\n".join(lines)
 
 
@@ -216,11 +219,29 @@ def main() -> int:
         log.info("Past end date; nothing to do.")
         return 0
 
+    if mode == "dry":
+        for product in products:
+            try:
+                info = check_page(product)
+                log.info(
+                    "DRY OK  id=%s type=%s status=%s expected=%s price=%s triggered=%s snippet=%s",
+                    product.get("id"),
+                    core.entry_type(product),
+                    (info or {}).get("status"),
+                    (info or {}).get("expected"),
+                    (info or {}).get("price"),
+                    (info or {}).get("triggered"),
+                    ((info or {}).get("snippet") or "")[:80],
+                )
+            except Exception as exc:
+                log.info("DRY FAIL  id=%s  error=%s", product.get("id"), exc)
+        return 0
+
     results, extra = run_once(cfg, state, products)
     if mode == "test" or not state.get("cloud_intro_sent"):
         text = summary_text(products, results)
         core.tg_send(text)
-        core.ntfy(cfg, title="☁️ Restockr en la nube: activo",
+        core.ntfy(cfg, title="☁️ Restockr cloud watcher: active",
                   message=htmlmod.unescape(text.replace("<b>", "").replace("</b>", "")),
                   priority=3, tags=["cloud"])
         state["cloud_intro_sent"] = True
