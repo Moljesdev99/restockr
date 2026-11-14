@@ -7,6 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -278,6 +280,9 @@ class TestGenericAlertBaseline(unittest.TestCase):
         core.ntfy_card = fake_ntfy
         core.ntfy = lambda *a, **k: (True, 200)
         core.tg_send = lambda *a, **k: True
+        import tempfile
+        from pathlib import Path as P
+        core.STATE_PATH = P(tempfile.mkstemp(suffix=".json")[1])
         state = core.default_state()
         info = ev(TICKETS_HTML, entry)
         core.handle_generic({"topic": "test"}, state, entry, info)
@@ -292,6 +297,7 @@ class TestGenericAlertBaseline(unittest.TestCase):
         self.assertEqual(sent["n"], 1)
 
 
+@pytest.mark.network
 class TestLivePages(unittest.TestCase):
     """Fetch a few public pages. Failures are reported honestly, not hidden."""
 

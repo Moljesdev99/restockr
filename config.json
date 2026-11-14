@@ -8,7 +8,8 @@
       "url": "https://openai.com/supply/co-lab/chromatic/",
       "emoji": "🎮",
       "is_test": false,
-      "primary": true
+      "primary": true,
+      "remind_on": "2026-11-19 07:00"
     },
     {
       "id": "disney-ezra",

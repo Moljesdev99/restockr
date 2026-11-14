@@ -13,6 +13,7 @@ import signal
 import sys
 import time
 import traceback
+import uuid
 import html as htmlmod
 import urllib.error
 import urllib.parse
@@ -32,9 +33,12 @@ LOG_PATH = DIR / "watch.log"
 
 TZ = ZoneInfo("America/Mexico_City")
 PRODUCT_URL = "https://openai.com/supply/co-lab/chromatic/"
-END_AT = datetime(2026, 11, 21, 23, 59, 59, tzinfo=TZ)
-NOV19 = datetime(2026, 11, 19, 7, 0, 0, tzinfo=TZ)
 HEARTBEAT_HOUR, HEARTBEAT_MINUTE = 9, 0
+CONFIG_RELOAD_S = 300
+# Set True in test mode so regular alerts are not enqueued and live state is not used.
+TEST_MODE = False
+DELIVERY_BACKOFF_CAP_S = 300
+DELIVERY_MAX_ATTEMPTS = 12
 
 CHECK_MIN_S, CHECK_MAX_S = 60, 120
 IN_STOCK_REPEAT_S = 120
@@ -161,7 +165,7 @@ def _param(entry: dict, *keys, default=None):
     reserved = {
         "id", "name", "short_name", "url", "emoji", "is_test", "primary",
         "type", "params", "parameters", "image", "image_url", "cooldown",
-        "button_text",
+        "button_text", "remind_on", "expected_date", "reminder", "remind_at",
     }
     for k in keys:
         if isinstance(params, dict) and k in params and params[k] is not None:
@@ -171,10 +175,57 @@ def _param(entry: dict, *keys, default=None):
     return default
 
 
-def load_config() -> dict:
-    cfg = json.loads(CONFIG_PATH.read_text())
-    if not cfg.get("topic"):
-        raise SystemExit("config.json missing topic")
+def parse_remind_at(entry: dict) -> datetime | None:
+    """Optional per-watch reminder. Supports remind_on, or expected_date + reminder=true.
+
+    Date-only values fire at 07:00 America/Mexico_City. No reminder unless configured.
+    """
+    raw = entry.get("remind_on")
+    if not raw and entry.get("reminder") and entry.get("expected_date"):
+        raw = entry.get("expected_date")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    text = text.replace("T", " ").replace("Z", "")
+    # drop a trailing timezone offset for simple parsing; we always use TZ
+    text = re.sub(r"([ap]m)$", "", text, flags=re.I)
+    text = re.sub(r"\s*[+-]\d{2}:?\d{2}$", "", text).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%Y-%m-%d":
+                dt = dt.replace(hour=7, minute=0, second=0)
+            return dt.replace(tzinfo=TZ)
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid remind_on/expected_date: {raw!r}")
+
+
+def watch_fingerprint(entry: dict) -> str:
+    payload = {
+        "url": entry.get("url"),
+        "type": entry_type(entry),
+        "selector": _param(entry, "selector", "css"),
+        "text": _param(entry, "text", "texts"),
+        "pattern": _param(entry, "pattern", "regex"),
+        "threshold": _param(entry, "threshold", "below", "max_price"),
+        "json_path": _param(entry, "json_path"),
+        "params": entry.get("params") or {},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def parse_config(cfg: dict, *, require_topic: bool = False) -> dict:
+    """Normalize and validate a config dict. Raises ValueError if invalid."""
+    if not isinstance(cfg, dict):
+        raise ValueError("config must be a JSON object")
+    cfg = dict(cfg)
+    if require_topic and not cfg.get("topic"):
+        raise ValueError("config.json missing topic")
     products = cfg.get("products")
     watches = cfg.get("watches") or []
     if not products:
@@ -185,11 +236,14 @@ def load_config() -> dict:
             if cfg.get("product_url"):
                 products[0]["url"] = cfg["product_url"]
     products = list(products or []) + list(watches)
-    # Normalize
     out = []
+    seen_ids: set[str] = set()
     for i, p in enumerate(products):
-        if not p.get("url") or not p.get("id"):
-            raise SystemExit(f"config product {i} missing id/url")
+        if not isinstance(p, dict) or not p.get("url") or not p.get("id"):
+            raise ValueError(f"config product {i} missing id/url")
+        if p["id"] in seen_ids:
+            raise ValueError(f"config has duplicate id {p['id']!r}")
+        seen_ids.add(p["id"])
         p = dict(p)
         p.setdefault("name", p["id"])
         p.setdefault("short_name", p["name"])
@@ -198,7 +252,7 @@ def load_config() -> dict:
         p.setdefault("primary", i == 0)
         p["type"] = entry_type(p)
         if p["type"] not in {"restock", "text_appears", "text_disappears", "price_below", "changed"}:
-            raise SystemExit(f"config product {i} ({p['id']}): unknown type {p.get('type')!r}")
+            raise ValueError(f"config product {i} ({p['id']}): unknown type {p.get('type')!r}")
         params = p.get("params") if isinstance(p.get("params"), dict) else None
         if params is None and isinstance(p.get("parameters"), dict):
             params = p.get("parameters")
@@ -208,14 +262,47 @@ def load_config() -> dict:
         if p.get("cooldown") is not None and p.get("cooldown") != "":
             try:
                 p["cooldown"] = int(p["cooldown"])
-            except (TypeError, ValueError):
-                raise SystemExit(f"config product {i} ({p['id']}): cooldown must be seconds (integer)")
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"config product {i} ({p['id']}): cooldown must be seconds (integer)") from exc
+        try:
+            p["remind_at"] = parse_remind_at(p)
+        except ValueError as exc:
+            raise ValueError(f"config product {i} ({p['id']}): {exc}") from exc
+        p["fingerprint"] = watch_fingerprint(p)
         out.append(p)
+    if not out:
+        raise ValueError("config has no products or watches")
     if not any(p.get("primary") for p in out):
         out[0]["primary"] = True
     cfg["products"] = out
     cfg["product_url"] = cfg.get("product_url") or next(p["url"] for p in out if p.get("primary"))
     return cfg
+
+
+def load_config() -> dict:
+    cfg = json.loads(CONFIG_PATH.read_text())
+    try:
+        return parse_config(cfg, require_topic=True)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def apply_new_config(old_cfg: dict, new_cfg: dict, state: dict) -> dict:
+    """Keep per-watch state for unchanged ids; reset baseline if a watch's rule changed."""
+    old_by_id = {p["id"]: p for p in (old_cfg or {}).get("products") or []}
+    for p in new_cfg["products"]:
+        pstate = product_state(state, p)
+        previous = old_by_id.get(p["id"])
+        if previous and previous.get("fingerprint") == p.get("fingerprint"):
+            continue
+        if previous:
+            log.info("Watch %s changed; resetting baseline", p["id"])
+        pstate["watch_baseline_set"] = False
+        pstate["last_content_hash"] = None
+        pstate["last_watch_triggered"] = False
+        pstate["pending_change"] = None
+        pstate["config_fingerprint"] = p.get("fingerprint")
+    return new_cfg
 
 
 def default_product_state() -> dict:
@@ -239,6 +326,7 @@ def default_state() -> dict:
         "test_sent": False,
         "heartbeat_dates": [],
         "nov19_heads_up_sent": False,
+        "pending_events": [],
         "products": {},
         # Legacy top-level chromatic fields (kept in sync)
         **default_product_state(),
@@ -292,6 +380,8 @@ def load_state(products: list[dict] | None = None) -> dict:
 
 
 def save_state(state: dict) -> None:
+    if TEST_MODE:
+        return
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     tmp.replace(STATE_PATH)
@@ -468,6 +558,8 @@ def status_label(status: str | None, expected: str | None) -> str:
         return "Waiting"
     if status == "changed":
         return "Content changed"
+    if status == "ambiguous":
+        return "Ambiguous (no alert)"
     return "To be confirmed"
 
 
@@ -1190,38 +1282,201 @@ def _simple_select(html: str, selector: str) -> str:
     return "\n".join(p for p in pieces if p)
 
 
+def select_matches(html: str, selector: str) -> list[tuple[str, str]]:
+    """Return list of (text, inner_html) for each CSS match. Empty if none."""
+    if not selector or not html:
+        return []
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+
+        soup = BeautifulSoup(html, "html.parser")
+        found = []
+        for el in soup.select(selector):
+            text = el.get_text(" ", strip=True)
+            inner = str(el)
+            found.append((text, inner))
+        if found:
+            return found
+    except Exception:
+        pass
+    text = _simple_select(html, selector)
+    if text:
+        return [(text, text)]
+    return []
+
+
 def select_text(html: str, selector: str) -> str:
     if not selector:
         return ""
-    found = _select_with_bs4(html, selector)
-    if found:
-        return found
-    return _simple_select(html, selector)
+    matches = select_matches(html, selector)
+    return "\n".join(t for t, _ in matches if t)
+
+
+def interpret_number(token: str) -> tuple[float | None, str | None]:
+    """Parse a single numeric token. error is None, 'ambiguous', or 'unparseable'."""
+    s = htmlmod.unescape(str(token)).replace("\xa0", " ").strip()
+    s = re.sub(r"\s+", "", s)
+    if not s or not re.search(r"\d", s):
+        return None, "unparseable"
+    s = s.replace("'", "")
+    if not re.search(r"[.,]", s):
+        try:
+            return float(s), None
+        except ValueError:
+            return None, "unparseable"
+    if "," in s and "." in s:
+        if s.rfind(".") > s.rfind(","):
+            try:
+                return float(s.replace(",", "")), None
+            except ValueError:
+                return None, "unparseable"
+        try:
+            return float(s.replace(".", "").replace(",", ".")), None
+        except ValueError:
+            return None, "unparseable"
+    sep = "," if "," in s else "."
+    parts = s.split(sep)
+    if len(parts) > 2:
+        if all(len(p) == 3 for p in parts[1:]) and parts[0].isdigit():
+            try:
+                return float("".join(parts)), None
+            except ValueError:
+                return None, "unparseable"
+        return None, "unparseable"
+    left, right = parts
+    if not left.isdigit() or not right.isdigit():
+        return None, "unparseable"
+    if len(right) == 3:
+        return None, "ambiguous"
+    if len(right) <= 2:
+        try:
+            return float(f"{left}.{right}"), None
+        except ValueError:
+            return None, "unparseable"
+    return None, "unparseable"
+
+
+_PRICE_TOKEN = re.compile(
+    r"(?:USD|EUR|GBP|CAD|MXN|US\$|MX\$|CA\$|US|\$|€|£)\s*"
+    r"(\d{1,3}(?:[.,\s]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{1,2}|\d+)"
+    r"|"
+    r"(\d{1,3}(?:[.,\s]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{1,2}|\d+)"
+    r"(?:\s*(?:USD|EUR|GBP|CAD|MXN))?",
+    re.I,
+)
+
+
+def extract_price_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    s = htmlmod.unescape(str(text)).replace("\xa0", " ")
+    out: list[str] = []
+    for m in _PRICE_TOKEN.finditer(s):
+        token = next(g for g in m.groups() if g)
+        out.append(token)
+    return out
+
+
+def parse_price_detailed(raw) -> tuple[float | None, str | None]:
+    """Return (amount, error) with error in {None, 'ambiguous', 'unparseable'}."""
+    if raw is None or raw is False:
+        return None, "unparseable"
+    if isinstance(raw, bool):
+        return None, "unparseable"
+    if isinstance(raw, (int, float)):
+        return float(raw), None
+    text = htmlmod.unescape(str(raw)).replace("\xa0", " ").strip()
+    if not text:
+        return None, "unparseable"
+    # Prefer the whole string if it is clearly one number
+    compact = re.sub(r"^(?:USD|EUR|GBP|CAD|MXN|US\$|MX\$|CA\$|US|\$|€|£)\s*|\s*(?:USD|EUR|GBP|CAD|MXN)$", "", text, flags=re.I).strip()
+    if re.fullmatch(r"\d{1,3}(?:[.,\s]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{1,2}|\d+", compact):
+        return interpret_number(compact)
+    tokens = extract_price_tokens(text)
+    if not tokens:
+        return interpret_number(compact)
+    parsed: list[float] = []
+    saw_ambiguous = False
+    for tok in tokens:
+        amount, err = interpret_number(tok)
+        if err == "ambiguous":
+            saw_ambiguous = True
+        elif amount is not None:
+            parsed.append(amount)
+    uniq = list(dict.fromkeys(parsed))
+    if len(uniq) == 1:
+        return uniq[0], None
+    if len(uniq) > 1:
+        return None, "ambiguous"
+    if saw_ambiguous:
+        return None, "ambiguous"
+    return None, "unparseable"
 
 
 def parse_price(raw) -> float | None:
-    if raw is None or raw is False:
+    amount, _err = parse_price_detailed(raw)
+    return amount
+
+
+def _walk_json_path(node, path: str):
+    cur = node
+    parts = re.findall(r"[^.\[\]]+|\d+", path.replace("][", ".").replace("[", ".").replace("]", ""))
+    for part in parts:
+        if cur is None:
+            return None
+        if isinstance(cur, list):
+            if part.isdigit():
+                idx = int(part)
+                cur = cur[idx] if 0 <= idx < len(cur) else None
+            else:
+                cur = cur[0] if cur and isinstance(cur[0], dict) else None
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+            continue
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+            continue
         return None
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        return float(raw)
-    s = htmlmod.unescape(str(raw)).replace("\xa0", " ").strip()
-    if not s:
-        return None
-    s = s.replace(",", "")
-    m = re.search(
-        r"(?:USD|EUR|GBP|CAD|MXN|US)?\s*[\$€£]\s*(\d+(?:\.\d{1,2})?)"
-        r"|(\d+(?:\.\d{1,2})?)\s*(?:USD|EUR|GBP|CAD|MXN)"
-        r"|(?<![\d.])(\d+(?:\.\d{1,2})?)(?!\d)",
-        s,
-        re.I,
-    )
-    if not m:
-        return None
-    num = next(g for g in m.groups() if g)
-    try:
-        return float(num)
-    except ValueError:
-        return None
+    return cur
+
+
+def _iter_json_blobs(html: str) -> list[object]:
+    blobs: list[object] = []
+    for m in re.finditer(
+        r'<script[^>]*type=["\']application/(?:ld\+json|json)["\'][^>]*>(.*?)</script>',
+        html or "",
+        re.I | re.S,
+    ):
+        raw = htmlmod.unescape(m.group(1)).strip()
+        if not raw:
+            continue
+        try:
+            blobs.append(json.loads(raw))
+        except json.JSONDecodeError:
+            continue
+    return blobs
+
+
+def price_from_json_path(html: str, path: str) -> tuple[float | None, str | None]:
+    values: list[float] = []
+    ambiguous = False
+    for blob in _iter_json_blobs(html):
+        found = _walk_json_path(blob, path)
+        if found is None:
+            continue
+        amount, err = parse_price_detailed(found)
+        if err == "ambiguous":
+            ambiguous = True
+        elif amount is not None:
+            values.append(amount)
+    uniq = list(dict.fromkeys(values))
+    if len(uniq) == 1:
+        return uniq[0], None
+    if len(uniq) > 1:
+        return None, "ambiguous"
+    if ambiguous:
+        return None, "ambiguous"
+    return None, "unparseable"
 
 
 def _walk_jsonld_prices(node, out: list[float]) -> None:
@@ -1233,39 +1488,19 @@ def _walk_jsonld_prices(node, out: list[float]) -> None:
         return
     for key in ("price", "lowPrice", "highPrice", "value"):
         if key in node:
-            p = parse_price(node.get(key))
+            p, err = parse_price_detailed(node.get(key))
             if p is not None:
                 out.append(p)
     offer = node.get("offers") or node.get("Offers")
     if offer is not None:
         _walk_jsonld_prices(offer, out)
-    for v in node.values():
-        if isinstance(v, (dict, list)):
-            _walk_jsonld_prices(v, out)
 
 
 def prices_from_jsonld(html: str) -> list[float]:
     prices: list[float] = []
-    for m in re.finditer(
-        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html or "",
-        re.I | re.S,
-    ):
-        raw = htmlmod.unescape(m.group(1)).strip()
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        _walk_jsonld_prices(data, prices)
-    seen: set[float] = set()
-    out: list[float] = []
-    for p in prices:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
+    for blob in _iter_json_blobs(html):
+        _walk_jsonld_prices(blob, prices)
+    return list(dict.fromkeys(prices))
 
 
 def format_money(amount: float | None, currency: str | None = None) -> str:
@@ -1278,16 +1513,28 @@ def format_money(amount: float | None, currency: str | None = None) -> str:
     return f"{prefix}{amount:.2f}"
 
 
-def _scoped(html: str, visible: str, entry: dict) -> tuple[str, str]:
+def _scope_or_raise(html: str, visible: str, entry: dict) -> tuple[str, str, str | None]:
+    """Return (scoped_html, scoped_text, selector_or_None).
+
+    If a selector is set but matches nothing, raise RuntimeError so the check
+    counts as a failure — never as a valid change or baseline.
+    """
     sel = _param(entry, "selector", "css")
-    if not sel:
-        return html or "", visible or ""
-    text = select_text(html, sel)
-    return html or "", text or ""
+    if sel is None or (isinstance(sel, str) and not str(sel).strip()):
+        return html or "", visible or "", None
+    sel = str(sel).strip()
+    matches = select_matches(html, sel)
+    if not matches:
+        raise RuntimeError(
+            f"Selector {sel!r} matched no content ({entry.get('id')})"
+        )
+    texts = [t for t, _h in matches]
+    inners = [h for _t, h in matches]
+    return "\n".join(inners), "\n".join(texts), sel
 
 
 def _needle_present(html: str, visible: str, entry: dict) -> tuple[bool, str]:
-    scoped_html, scoped_vis = _scoped(html, visible, entry)
+    scoped_html, scoped_vis, sel = _scope_or_raise(html, visible, entry)
     case = bool(_param(entry, "case_sensitive", default=False))
     flags = 0 if case else re.I
     pattern = _param(entry, "pattern", "regex")
@@ -1318,37 +1565,92 @@ def _needle_present(html: str, visible: str, entry: dict) -> tuple[bool, str]:
     return False, ""
 
 
-def extract_watch_price(html: str, visible: str, entry: dict) -> float | None:
-    scoped_html, scoped_vis = _scoped(html, visible, entry)
+def extract_watch_price(html: str, visible: str, entry: dict) -> dict:
+    """Locate a price. User locator (selector / regex / json_path) wins.
+
+    Returns {amount, error, candidates, source}.
+    error is None, 'ambiguous', or 'unparseable'.
+    """
+    result = {"amount": None, "error": None, "candidates": [], "source": None}
+    scoped_html, scoped_vis, sel = _scope_or_raise(html, visible, entry)
     pattern = _param(entry, "pattern", "regex")
+    json_path = _param(entry, "json_path")
+
+    def _finish(amounts: list[float], source: str, ambiguous: bool = False):
+        uniq = list(dict.fromkeys(amounts))
+        result["candidates"] = uniq
+        result["source"] = source
+        if len(uniq) == 1:
+            result["amount"] = uniq[0]
+            result["error"] = None
+        elif len(uniq) > 1 or ambiguous:
+            result["error"] = "ambiguous"
+        else:
+            result["error"] = "unparseable"
+        return result
+
+    # 1) User regex (optionally scoped)
     if pattern:
         flags = 0 if _param(entry, "case_sensitive", default=False) else re.I
         try:
-            m = re.search(pattern, scoped_vis, flags) or re.search(
-                pattern, scoped_html, flags
+            matches = list(re.finditer(pattern, scoped_vis, flags)) or list(
+                re.finditer(pattern, scoped_html, flags)
             )
         except re.error as exc:
             raise RuntimeError(
                 f"Invalid regex in watch {entry.get('id')}: {exc}"
             ) from exc
-        if m:
+        amounts: list[float] = []
+        amb = False
+        for m in matches:
             grp = m.group(1) if m.lastindex else m.group(0)
-            p = parse_price(grp)
-            if p is not None:
-                return p
-    if _param(entry, "jsonld", default=True):
-        found = prices_from_jsonld(html)
-        if found:
-            return min(found)
-    if _param(entry, "selector", "css") and scoped_vis:
-        p = parse_price(scoped_vis)
-        if p is not None:
-            return p
+            amount, err = parse_price_detailed(grp)
+            if err == "ambiguous":
+                amb = True
+            elif amount is not None:
+                amounts.append(amount)
+        return _finish(amounts, "regex", amb)
+
+    # 2) User JSON path
+    if json_path:
+        amount, err = price_from_json_path(html, str(json_path))
+        if amount is not None:
+            return _finish([amount], "json_path")
+        result["error"] = err or "unparseable"
+        result["source"] = "json_path"
+        return result
+
+    # 3) User CSS selector: only prices inside it
+    if sel:
+        amounts = []
+        amb = False
+        for tok in extract_price_tokens(scoped_vis) or [scoped_vis]:
+            amount, err = parse_price_detailed(tok)
+            if err == "ambiguous":
+                amb = True
+            elif amount is not None:
+                amounts.append(amount)
+        return _finish(amounts, "selector", amb)
+
+    # 4) No locator: collect page candidates; many different values → ambiguous
+    amounts = []
+    amb = False
+    for p in prices_from_jsonld(html):
+        amounts.append(p)
     labeled = extract_price(html, visible)
-    p = parse_price(labeled) if labeled else None
-    if p is not None:
-        return p
-    return parse_price(scoped_vis or visible)
+    if labeled:
+        amount, err = parse_price_detailed(labeled)
+        if err == "ambiguous":
+            amb = True
+        elif amount is not None:
+            amounts.append(amount)
+    for tok in extract_price_tokens(visible or ""):
+        amount, err = parse_price_detailed(tok)
+        if err == "ambiguous":
+            amb = True
+        elif amount is not None:
+            amounts.append(amount)
+    return _finish(amounts, "page", amb)
 
 
 def _hash_text(text: str, ignore) -> str:
@@ -1396,19 +1698,37 @@ def evaluate_generic(title: str, html: str, visible: str, entry: dict) -> dict:
         threshold = _param(entry, "threshold", "below", "max_price")
         if threshold is None:
             raise RuntimeError(f"Watch {entry.get('id')} (price_below) needs a 'threshold'")
-        threshold = parse_price(threshold)
-        if threshold is None:
-            raise RuntimeError(f"Watch {entry.get('id')}: invalid price threshold")
+        threshold_val, thr_err = parse_price_detailed(threshold)
+        if threshold_val is None:
+            raise RuntimeError(f"Watch {entry.get('id')}: invalid price threshold ({thr_err})")
+        threshold = threshold_val
         inclusive = bool(_param(entry, "inclusive", default=True))
-        amount = extract_watch_price(html, visible, entry)
+        found = extract_watch_price(html, visible, entry)
+        info["price_source"] = found.get("source")
+        info["threshold"] = threshold
+        if found.get("error") == "ambiguous" or (
+            found.get("amount") is None and found.get("error") == "ambiguous"
+        ):
+            info["ambiguous"] = True
+            info["triggered"] = False
+            info["status"] = "ambiguous"
+            info["snippet"] = (
+                "Ambiguous price; not alerting. "
+                f"Candidates: {found.get('candidates') or 'none'} "
+                f"(source={found.get('source')})"
+            )
+            return info
+        amount = found.get("amount")
         if amount is None:
-            raise RuntimeError(f"Could not find a price on the page ({entry.get('id')})")
+            raise RuntimeError(
+                f"Could not find a price on the page ({entry.get('id')}, "
+                f"source={found.get('source')}, error={found.get('error')})"
+            )
         triggered = amount <= threshold if inclusive else amount < threshold
         currency = _param(entry, "currency")
         info["triggered"] = triggered
         info["status"] = "triggered" if triggered else "idle"
         info["price_value"] = amount
-        info["threshold"] = threshold
         info["price"] = format_money(amount, currency)
         info["snippet"] = (
             f"{format_money(amount, currency)} "
@@ -1416,8 +1736,8 @@ def evaluate_generic(title: str, html: str, visible: str, entry: dict) -> dict:
         )
         return info
     if kind == "changed":
-        _, scoped_vis = _scoped(html, visible, entry)
-        basis = scoped_vis if _param(entry, "selector", "css") else (visible or "")
+        _scoped_html, scoped_vis, sel = _scope_or_raise(html, visible, entry)
+        basis = scoped_vis if sel else (visible or "")
         digest = _hash_text(basis, _param(entry, "ignore", "strip"))
         info["content_hash"] = digest
         info["snippet"] = (basis or "")[:200] or None
@@ -1504,51 +1824,277 @@ def check_page(product: dict | None = None, _context=None) -> dict:
     return evaluate_page(title, html, visible, product)
 
 
+def _channel_ready(ch: dict, now: datetime) -> bool:
+    if ch.get("status") in ("sent", "skipped"):
+        return False
+    last = ch.get("last_attempt_ts")
+    attempts = int(ch.get("attempts") or 0)
+    if not last or attempts <= 0:
+        return True
+    try:
+        previous = datetime.fromisoformat(str(last))
+        if previous.tzinfo is None:
+            previous = previous.replace(tzinfo=TZ)
+        delay = min(DELIVERY_BACKOFF_CAP_S, 2 ** min(attempts, 8))
+        return (now - previous).total_seconds() >= delay
+    except Exception:
+        return True
+
+
+def _event_product(event: dict, products_by_id: dict | None = None) -> dict:
+    if products_by_id and event.get("watch_id") in products_by_id:
+        return products_by_id[event["watch_id"]]
+    return event.get("product") or {"id": event.get("watch_id"), "url": PRODUCT_URL, "name": event.get("watch_id")}
+
+
+def _ntfy_on(cfg: dict) -> bool:
+    if cfg.get("_ntfy_enabled") is False:
+        return False
+    topic = (cfg or {}).get("topic") or ""
+    return bool(topic) and topic != "restockr-no-topic"
+
+
+def enqueue_alert(
+    cfg: dict,
+    state: dict,
+    product: dict,
+    *,
+    kind: str,
+    info: dict | None = None,
+    pstate: dict | None = None,
+    event_line: str | None = None,
+    priority: int = 4,
+    tags: list[str] | None = None,
+    text: str | None = None,
+    title: str | None = None,
+    use_card: bool = True,
+    coalesce: bool = True,
+) -> dict | None:
+    """Queue an alert. Not marked delivered until each channel succeeds.
+
+    If an event of the same watch+kind is already pending, its payload is
+    updated to the latest values (coalesced) without resetting a channel
+    that already succeeded.
+    """
+    if TEST_MODE:
+        return None
+    product = product or {}
+    pstate = pstate or {}
+    info = info or {}
+    event = {
+        "id": str(uuid.uuid4()),
+        "watch_id": product.get("id"),
+        "kind": kind,
+        "event_line": event_line,
+        "info": {
+            k: info.get(k)
+            for k in (
+                "status", "expected", "price", "price_value", "threshold",
+                "snippet", "image_url", "description", "title", "triggered",
+                "content_hash", "matched_text", "watch_type",
+            )
+            if k in info
+        },
+        "pstate": {
+            k: pstate.get(k)
+            for k in ("product_image_url", "product_description", "product_price", "last_status", "last_expected_restock")
+        },
+        "product": {
+            k: product.get(k)
+            for k in (
+                "id", "name", "short_name", "url", "emoji", "type",
+                "button_text", "image", "image_url", "is_test", "primary",
+            )
+        },
+        "is_test": bool(product.get("is_test")),
+        "priority": priority,
+        "tags": list(tags or []),
+        "text": text,
+        "title": title,
+        "use_card": use_card,
+        "created_ts": now_mx().isoformat(),
+        "channels": {
+            "telegram": {"status": "pending", "attempts": 0, "last_attempt_ts": None},
+            "ntfy": {
+                "status": "pending" if _ntfy_on(cfg) else "skipped",
+                "attempts": 0,
+                "last_attempt_ts": None,
+            },
+        },
+    }
+    pending = state.setdefault("pending_events", [])
+    if coalesce:
+        for existing in pending:
+            if existing.get("watch_id") == event["watch_id"] and existing.get("kind") == kind:
+                for key in ("event_line", "info", "pstate", "product", "text", "title", "priority", "tags", "use_card", "is_test"):
+                    existing[key] = event[key]
+                existing["updated_ts"] = event["created_ts"]
+                log.info("Coalesced pending event watch=%s kind=%s", event["watch_id"], kind)
+                save_state(state)
+                return existing
+    pending.append(event)
+    save_state(state)
+    return event
+
+
+def _send_event_channel(cfg: dict, channel: str, event: dict, product: dict) -> bool:
+    info = event.get("info") or {}
+    pstate = event.get("pstate") or {}
+    if channel == "telegram":
+        if event.get("use_card"):
+            return bool(
+                tg_send_card(
+                    info,
+                    pstate,
+                    product=product,
+                    is_test=bool(event.get("is_test")),
+                    event_line=event.get("event_line"),
+                )
+            )
+        return bool(tg_send(event.get("text") or event.get("event_line") or ""))
+    if channel == "ntfy":
+        if not _ntfy_on(cfg):
+            return True
+        if event.get("use_card"):
+            ok, _status = ntfy_card(
+                cfg,
+                product,
+                info,
+                pstate,
+                is_test=bool(event.get("is_test")),
+                event_line=event.get("event_line"),
+                priority=int(event.get("priority") or 4),
+                tags=event.get("tags"),
+            )
+            return bool(ok)
+        title = event.get("title") or event.get("event_line") or "Restockr"
+        title = re.sub(r"</?b>", "", title)
+        ok, _status = ntfy(
+            cfg,
+            title=title,
+            message=event.get("text") or title,
+            priority=int(event.get("priority") or 3),
+            tags=event.get("tags"),
+        )
+        return bool(ok)
+    return False
+
+
+def flush_pending(cfg: dict, state: dict, products: list[dict] | None = None) -> None:
+    """Retry pending events with per-channel backoff. Persist after each attempt."""
+    if TEST_MODE:
+        return
+    pending = list(state.get("pending_events") or [])
+    if not pending:
+        return
+    now = now_mx()
+    by_id = {p["id"]: p for p in (products or [])}
+    still: list[dict] = []
+    changed = False
+    for event in pending:
+        product = _event_product(event, by_id)
+        channels = event.setdefault("channels", {})
+        for name in ("telegram", "ntfy"):
+            ch = channels.setdefault(name, {"status": "pending", "attempts": 0})
+            if name == "ntfy" and not _ntfy_on(cfg) and ch.get("status") != "sent":
+                if ch.get("status") != "skipped":
+                    ch["status"] = "skipped"
+                    changed = True
+                continue
+            if ch.get("status") in ("sent", "skipped"):
+                continue
+            if int(ch.get("attempts") or 0) >= DELIVERY_MAX_ATTEMPTS:
+                continue
+            if not _channel_ready(ch, now):
+                continue
+            ch["attempts"] = int(ch.get("attempts") or 0) + 1
+            ch["last_attempt_ts"] = now.isoformat()
+            changed = True
+            try:
+                ok = _send_event_channel(cfg, name, event, product)
+            except Exception as exc:
+                log.warning("Delivery %s failed for %s/%s: %s", name, event.get("watch_id"), event.get("kind"), exc)
+                ok = False
+            ch["status"] = "sent" if ok else "failed"
+            log.info(
+                "Delivery %s %s watch=%s kind=%s attempt=%s",
+                name,
+                "ok" if ok else "failed",
+                event.get("watch_id"),
+                event.get("kind"),
+                ch["attempts"],
+            )
+        if all((channels.get(n) or {}).get("status") in ("sent", "skipped") for n in ("telegram", "ntfy")):
+            continue
+        still.append(event)
+    if changed or len(still) != len(pending):
+        state["pending_events"] = still
+        save_state(state)
+
+
+def emit_alert(cfg, state, product, **kwargs) -> dict | None:
+    """Enqueue and immediately try to deliver."""
+    event = enqueue_alert(cfg, state, product, **kwargs)
+    flush_pending(cfg, state, [product])
+    return event
+
+
+
+
 def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: str) -> None:
     n = now_mx()
-    # Primary restock product only: Nov 19 heads-up
-    if (
-        product.get("primary")
-        and is_restock(product)
-        and not state.get("nov19_heads_up_sent")
-        and n.date() == NOV19.date()
-        and n >= NOV19
-    ):
-        ntfy_card(
-            cfg,
-            product,
-            pstate=pstate,
-            event_line="⏰ <b>Restock is today</b>",
-            priority=4,
-            tags=["alarm_clock", "gameboy"],
-        )
-        tg_send_card(
-            state=pstate,
-            product=product,
-            event_line="⏰ <b>Restock is today</b>",
-        )
-        state["nov19_heads_up_sent"] = True
-        save_state(state)
+    remind_at = product.get("remind_at")
+    if isinstance(remind_at, str):
+        try:
+            remind_at = datetime.fromisoformat(remind_at)
+            if remind_at.tzinfo is None:
+                remind_at = remind_at.replace(tzinfo=TZ)
+        except ValueError:
+            remind_at = None
+    if remind_at and n >= remind_at:
+        day = remind_at.date().isoformat()
+        if pstate.get("reminder_sent_on") != day:
+            line = (
+                "⏰ <b>Restock is today</b>"
+                if is_restock(product)
+                else "⏰ <b>Today is the expected date</b>"
+            )
+            emit_alert(
+                cfg,
+                state,
+                product,
+                kind="reminder",
+                info={"status": status},
+                pstate=pstate,
+                event_line=line,
+                priority=4,
+                tags=["alarm_clock"],
+            )
+            pstate["reminder_sent_on"] = day
+            save_state(state)
 
     today = n.date().isoformat()
     heartbeat_at = n.replace(
         hour=HEARTBEAT_HOUR, minute=HEARTBEAT_MINUTE, second=0, microsecond=0
     )
-    # Heartbeat once per day, only after the primary product check
     if (
         product.get("primary")
         and n >= heartbeat_at
         and today not in state.get("heartbeat_dates", [])
         and status != "in_stock"
     ):
-        ntfy(
+        emit_alert(
             cfg,
+            state,
+            product,
+            kind="heartbeat",
+            use_card=False,
             title="☁️ Cloud watcher is active",
-            message="Cloud watcher is active, no stock yet.",
+            text="Cloud watcher is active, no stock yet.",
+            event_line="☁️ Cloud watcher is active, no stock yet.",
             priority=3,
             tags=["green_heart"],
         )
-        tg_send("☁️ Cloud watcher is active, no stock yet.")
         dates = list(state.get("heartbeat_dates", []))
         dates.append(today)
         state["heartbeat_dates"] = dates[-30:]
@@ -1580,28 +2126,75 @@ def handle_generic(cfg: dict, state: dict, product: dict, info: dict) -> None:
     pstate["successful_checks"] = int(pstate.get("successful_checks") or 0) + 1
     cache_product_fields(pstate, info)
 
+    if info.get("ambiguous"):
+        log.warning(
+            "CHECK AMBIGUOUS  product=%s  %s",
+            product.get("id"),
+            info.get("snippet") or "ambiguous value",
+        )
+        sync_primary_state(state, product, pstate)
+        save_state(state)
+        maybe_specials(cfg, state, product, pstate, "ambiguous")
+        return
+
     if info.get("content_hash"):
         prev_hash = pstate.get("last_content_hash")
         if kind == "changed" and pstate.get("watch_baseline_set") and prev_hash and prev_hash != info["content_hash"]:
             triggered = True
             info["triggered"] = True
             info["status"] = "changed"
+        # Always remember the latest hash so coalesced alerts use it
         pstate["last_content_hash"] = info["content_hash"]
 
     first = not pstate.get("watch_baseline_set")
+    # Repeats only when a cooldown is configured and has elapsed.
+    # A missing cooldown means: leading-edge only (or every change, for "changed").
+    repeat_due = _generic_due(product, pstate)
+    change_due = (not product.get("cooldown")) or repeat_due
     should_alert = False
     if first:
         should_alert = False
+        pstate["pending_change"] = None
     elif kind == "changed":
-        should_alert = triggered and (
-            not product.get("cooldown") or _generic_due(product, pstate)
-        )
+        if triggered and change_due:
+            should_alert = True
+            pstate["pending_change"] = None
+        elif triggered and not change_due:
+            pstate["pending_change"] = {
+                "info": dict(info),
+                "event_line": generic_event_line(product, info),
+                "updated_ts": now_mx().isoformat(),
+            }
+            log.info("Change during cooldown kept pending for %s", product.get("id"))
+        elif (not triggered) and pstate.get("pending_change") and change_due:
+            pending = pstate.pop("pending_change")
+            info = pending.get("info") or info
+            triggered = True
+            should_alert = True
     else:
         was = bool(pstate.get("last_watch_triggered"))
         if triggered and not was:
             should_alert = True
-        elif triggered and was and _generic_due(product, pstate):
+            pstate["pending_change"] = None
+        elif triggered and was and repeat_due:
             should_alert = True
+            pstate["pending_change"] = None
+        elif triggered and was and product.get("cooldown") and not repeat_due:
+            pstate["pending_change"] = {
+                "info": dict(info),
+                "event_line": generic_event_line(product, info),
+                "updated_ts": now_mx().isoformat(),
+            }
+        elif (not triggered) and pstate.get("pending_change") and repeat_due:
+            pending = pstate.pop("pending_change")
+            info = pending.get("info") or info
+            should_alert = True
+
+    due = change_due if kind == "changed" else repeat_due
+    if not should_alert and pstate.get("pending_change") and due and not first:
+        pending = pstate.pop("pending_change")
+        info = pending.get("info") or info
+        should_alert = True
 
     log.info(
         "CHECK OK  product=%s  type=%s  status=%s  triggered=%s  first=%s  alert=%s  price=%s",
@@ -1616,24 +2209,19 @@ def handle_generic(cfg: dict, state: dict, product: dict, info: dict) -> None:
 
     if should_alert:
         line = generic_event_line(product, info)
-        ntfy_card(
+        emit_alert(
             cfg,
+            state,
             product,
-            info,
-            pstate,
-            is_test=bool(product.get("is_test")),
+            kind=f"generic:{kind}",
+            info=info,
+            pstate=pstate,
             event_line=line,
             priority=5 if triggered else 4,
             tags=["bell", "warning"],
         )
-        tg_send_card(
-            info,
-            pstate,
-            product=product,
-            is_test=bool(product.get("is_test")),
-            event_line=line,
-        )
         pstate["last_generic_alert_ts"] = now_mx().isoformat()
+        pstate["pending_change"] = None
 
     pstate["watch_baseline_set"] = True
     pstate["last_watch_triggered"] = triggered
@@ -1642,19 +2230,21 @@ def handle_generic(cfg: dict, state: dict, product: dict, info: dict) -> None:
     if info.get("snippet"):
         pstate["last_watch_snippet"] = info["snippet"]
     if pstate.get("blocked_warning_sent"):
-        ntfy(
+        emit_alert(
             cfg,
+            state,
+            product,
+            kind="recovered",
+            use_card=False,
             title=f"✅ Watcher recovered ({product.get('name')})",
-            message=(
+            text=(
                 f"I could read “{product.get('name')}” again. "
                 f"Status: {status_label(info.get('status'), None)}."
             ),
+            event_line=f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the page')}” again. "
+            f"Status: {htmlmod.escape(status_label(info.get('status'), None))}.",
             priority=4,
             tags=["white_check_mark"],
-        )
-        tg_send(
-            f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the page')}” again. "
-            f"Status: {htmlmod.escape(status_label(info.get('status'), None))}."
         )
         pstate["blocked_warning_sent"] = False
     sync_primary_state(state, product, pstate)
@@ -1699,22 +2289,16 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
         and expected != prev_expected
         and status != "unknown"
     ):
-        ntfy_card(
+        emit_alert(
             cfg,
+            state,
             product,
-            info,
-            pstate,
-            is_test=always_test,
+            kind="date_change",
+            info=info,
+            pstate=pstate,
             event_line="📅 <b>Restock date changed</b>",
             priority=4,
             tags=["calendar", "warning"],
-        )
-        tg_send_card(
-            info,
-            pstate,
-            product=product,
-            is_test=always_test,
-            event_line="📅 <b>Restock date changed</b>",
         )
 
     if status == "in_stock":
@@ -1733,35 +2317,29 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
                 due = True
         if due and sent < IN_STOCK_ALERT_MAX:
             n = sent + 1
-            ntfy_card(
+            emit_alert(
                 cfg,
+                state,
                 product,
-                info,
-                pstate,
-                is_test=always_test,
+                kind="in_stock",
+                info=info,
+                pstate=pstate,
                 priority=5,
                 tags=["tada", "shopping", "warning"],
             )
-            tg_send_card(info, pstate, product=product, is_test=always_test)
             pstate["in_stock_alerts_sent"] = n
             pstate["last_in_stock_alert_ts"] = now_mx().isoformat()
     elif status == "out_of_stock" and prev_status == "in_stock":
-        ntfy_card(
+        emit_alert(
             cfg,
+            state,
             product,
-            info,
-            pstate,
-            is_test=always_test,
+            kind="sold_out",
+            info=info,
+            pstate=pstate,
             event_line="⚪ <b>Sold out again</b>",
             priority=4,
             tags=["white_circle", "shopping"],
-        )
-        tg_send_card(
-            info,
-            pstate,
-            product=product,
-            is_test=always_test,
-            event_line="⚪ <b>Sold out again</b>",
         )
         pstate["in_stock_alerts_sent"] = 0
         pstate["last_in_stock_alert_ts"] = None
@@ -1773,19 +2351,23 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
     pstate["successful_checks"] = int(pstate.get("successful_checks") or 0) + 1
     pstate["consecutive_failures"] = 0
     if pstate.get("blocked_warning_sent"):
-        ntfy(
+        emit_alert(
             cfg,
+            state,
+            product,
+            kind="recovered",
+            use_card=False,
             title=f"✅ Watcher recovered ({product.get('name')})",
-            message=(
+            text=(
                 f"I could read “{product.get('name')}” again. "
+                f"Status: {'in stock' if status == 'in_stock' else 'still out of stock'}."
+            ),
+            event_line=(
+                f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the product')}” again. "
                 f"Status: {'in stock' if status == 'in_stock' else 'still out of stock'}."
             ),
             priority=4,
             tags=["white_check_mark"],
-        )
-        tg_send(
-            f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the product')}” again. "
-            f"Status: {'in stock' if status == 'in_stock' else 'still out of stock'}."
         )
         pstate["blocked_warning_sent"] = False
     sync_primary_state(state, product, pstate)
@@ -1806,19 +2388,23 @@ def handle_failure(cfg: dict, state: dict, product: dict, err: str) -> float:
     if n >= MAX_CONSECUTIVE_FAILURES_BEFORE_WARN and not pstate.get(
         "blocked_warning_sent"
     ):
-        ntfy(
+        emit_alert(
             cfg,
+            state,
+            product,
+            kind="blocked",
+            use_card=False,
             title=f"⚠️ Watcher blocked ({product.get('name')})",
-            message=(
+            text=(
                 f"I could not read “{product.get('name')}” {n} times in a row "
                 "(possible block). I will keep retrying."
             ),
+            event_line=(
+                f"⚠️ I could not read “{htmlmod.escape(product.get('name') or 'the page')}” "
+                f"{n} times in a row (possible block). I will keep retrying."
+            ),
             priority=4,
             tags=["warning"],
-        )
-        tg_send(
-            f"⚠️ I could not read “{htmlmod.escape(product.get('name') or 'the page')}” "
-            f"{n} times in a row (possible block). I will keep retrying."
         )
         pstate["blocked_warning_sent"] = True
     sync_primary_state(state, product, pstate)
@@ -1881,9 +2467,8 @@ def main() -> int:
     products = cfg["products"]
     state = load_state(products)
     log.info(
-        "Watcher starting pid=%s end_at=%s products=%s",
+        "Watcher starting pid=%s products=%s",
         os.getpid(),
-        END_AT.isoformat(),
         ",".join(p["id"] for p in products),
     )
 
@@ -1903,10 +2488,8 @@ def main() -> int:
 
     try:
         while not _stop:
-            if now_mx() >= END_AT:
-                log.info("Reached end date %s, exiting.", END_AT.isoformat())
-                return 0
             maybe_rotate_log()
+            flush_pending(cfg, state, products)
             extra = 0.0
             last_results: dict = {}
             for product in products:
@@ -1928,6 +2511,11 @@ def main() -> int:
         log.info("Stopped cleanly")
         return 0
     finally:
+        try:
+            flush_pending(cfg, state, products)
+            save_state(state)
+        except Exception:
+            log.exception("Final flush/save failed")
         try:
             os.close(lock_fd)
         except Exception:

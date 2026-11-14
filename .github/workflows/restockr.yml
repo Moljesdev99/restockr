@@ -2,13 +2,16 @@ name: Restockr
 
 on:
   schedule:
-    # Every 20 min (odd minutes avoid GitHub's busy :00). Only one run checks at a
-    # time; the next one waits in line and starts the moment the current ends.
+    # Every 20 min (odd minutes avoid GitHub's busy :00). The concurrency group
+    # keeps only one watch run active. A second run may wait, but GitHub keeps
+    # only one *pending* run per group and drops older queued ones — so a long
+    # run plus delayed cron can still leave a short gap. The next start always
+    # waits until this workflow (including state save) has finished.
     - cron: "7,27,47 * * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "watch = normal watch · test = only send a test message"
+        description: "watch = normal watch · test = one summary, no live state"
         type: choice
         options: [watch, test]
         default: watch
@@ -19,10 +22,13 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   watch:
     runs-on: ubuntu-latest
+    # GitHub's job cap is 6 hours. Leave a few minutes after RUN_MINUTES for
+    # the save / artifact steps, including after a timeout or cancel.
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v7
@@ -33,25 +39,60 @@ jobs:
           .venv/bin/pip install -q -r requirements.txt
 
       - name: Restore last state
+        if: ${{ (github.event.inputs.mode || 'watch') == 'watch' }}
+        id: cache
         uses: actions/cache/restore@v6
         with:
           path: state.json
           key: restockr-state-${{ github.run_id }}
           restore-keys: restockr-state-
 
+      - name: Restore state from last artifact
+        if: ${{ (github.event.inputs.mode || 'watch') == 'watch' && steps.cache.outputs.cache-hit != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -f state.json ]; then
+            echo "State already present"
+            exit 0
+          fi
+          ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=restockr-state&per_page=5" --jq '[.artifacts[] | select(.expired==false)] | sort_by(.created_at) | reverse | .[0].id' || true)"
+          if [ -z "${ID}" ] || [ "${ID}" = "null" ]; then
+            echo "No previous state artifact found"
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ID}/zip" > /tmp/restockr-state.zip
+          python3 -c "import zipfile; from pathlib import Path; z=zipfile.ZipFile('/tmp/restockr-state.zip');
+found=False
+for n in z.namelist():
+    if n.endswith('state.json'):
+        Path('state.json').write_bytes(z.read(n)); print('Restored', n); found=True; break
+raise SystemExit(0 if found else 'state.json not in artifact')"
+
       - name: Watch
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODE: ${{ github.event.inputs.mode || 'watch' }}
           RUN_MINUTES: "340"
           PYTHONUNBUFFERED: "1"
         run: .venv/bin/python restockr.py
 
       - name: Save state
-        if: always() && (github.event.inputs.mode || 'watch') == 'watch'
+        if: ${{ always() && (github.event.inputs.mode || 'watch') == 'watch' }}
         uses: actions/cache/save@v6
         with:
           path: state.json
           key: restockr-state-${{ github.run_id }}
+
+      - name: Upload state artifact
+        if: ${{ always() && (github.event.inputs.mode || 'watch') == 'watch' && hashFiles('state.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: restockr-state
+          path: state.json
+          retention-days: 14
+          if-no-files-found: ignore

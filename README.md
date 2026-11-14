@@ -12,7 +12,8 @@ It is not limited to shop restocks. Restocks are one watch type among several.
 - Sends a **Telegram card** with a photo (when one is available), a short status, and a button: **🛒 View product** for restocks, **🔗 Open page** for everything else.
 - Optionally sends the same alert to ntfy.
 - Every day at **09:00 Mexico City time** (`America/Mexico_City`), it sends a heartbeat, as long as the primary restock item is not in stock.
-- This copy stops on its own on **21 November 2026** (a date hard-coded in the source; see below to change it).
+- It keeps running until you **disable the workflow**. There is no built-in end date.
+- A long run reloads `config.json` from this repository about every five minutes, so new or edited watches apply without waiting for the next job.
 
 The **restock** type is tested with **OpenAI Supply Co.** and the **Disney Store** (including Disney’s Queue-it waiting room). The other types (`text_appears`, `text_disappears`, `price_below`, `changed`) work when the information is present in the HTML that the watcher downloads. See [Limitations](#limitations).
 
@@ -47,12 +48,27 @@ Existing restock entries keep working if you omit `type` (it defaults to `restoc
 | `type` | Triggers when | Useful for |
 |---|---|---|
 | `restock` | The page looks in stock, the expected date changes, it sells out again, or (Disney) a `queue.*` waiting room opens | Products |
-| `text_appears` | A string or regex is found on the page (optional CSS `selector`) | “Buy tickets”, a release date, “Available” |
-| `text_disappears` | A string or regex is no longer found | “Sold out” disappearing on a hotel or event page |
-| `price_below` | An extracted price is at or below `threshold` (CSS selector, regex, or JSON-LD) | Flights, hotels, products — **if the price is in the HTML** |
+| `text_appears` | A string or regex is found in the page (or only inside `selector` if you set one) | “Buy tickets”, a release date, “Available” |
+| `text_disappears` | A string or regex is no longer found in that same scope | “Sold out” disappearing on a hotel or event page |
+| `price_below` | An extracted price is at or below `threshold` | Flights, hotels, products — **if the price is in the HTML** |
 | `changed` | The text of the page (or of a `selector`) changes compared with the last check | Release-date pages, any “tell me if this changes” use |
 
-Common fields on every entry: `id`, `name`, `url`, `type`, `emoji`, optional `image` / `image_url`, optional `cooldown` (seconds), optional `is_test` (prefix alerts with 🧪 Test), optional `primary` (daily heartbeat; only one should be true), optional `button_text`. Parameters can go in a `params` object or directly on the entry (`text`, `pattern`, `selector`, `threshold`, `currency`, `jsonld`, `ignore`, `inclusive`).
+Common fields on every entry: `id`, `name`, `url`, `type`, `emoji`, optional `image` / `image_url`, optional `cooldown` (seconds), optional `is_test` (prefix alerts with 🧪 Test), optional `primary` (daily heartbeat; only one should be true), optional `button_text`.
+
+Optional reminder (only if you set it; nothing is hard-coded to a product or date):
+
+- `remind_on`: `"2026-11-19"` (fires at 07:00 Mexico City time) or `"2026-11-19 07:00"`
+- or `expected_date`: `"2026-11-19"` together with `"reminder": true`
+
+Other parameters can go in a `params` object or directly on the entry: `text`, `pattern`, `selector`, `threshold`, `currency`, `json_path`, `ignore`, `inclusive`.
+
+**CSS `selector`:** when you set one, the watcher searches *only* inside that section. If the selector matches nothing, that check is an error (after several failures you get a ⚠️ warning). It is not treated as “the text disappeared” or as a valid page change.
+
+**Prices:** a locator you provide (`selector`, `pattern`, or `json_path`) is used instead of JSON-LD or other prices on the page (those often belong to related items). Supported number formats include `19.99`, `19,99`, `1,299.00`, and `1.299,00`. A lone `1,299` or `1.299` is ambiguous and will **not** raise an alert. If several *different* prices are found and you did not give a locator, the watcher also stays silent and logs the ambiguity.
+
+**Cooldown:** if the page changes again while a cooldown is running, the latest value is kept and sent when the cooldown ends (it is not dropped).
+
+**Alerts:** a message is only marked delivered on a channel (Telegram or ntfy) after that channel succeeds. Failures are retried with backoff and stored in state so the next loop or job can try again. A channel that already succeeded is not resent.
 
 ## Use-case examples
 
@@ -68,11 +84,12 @@ Copy an example into your `config.json`, then put **your** URL and wording. The 
   "url": "https://openai.com/supply/co-lab/chromatic/",
   "emoji": "🎮",
   "type": "restock",
-  "primary": true
+  "primary": true,
+  "remind_on": "2026-11-19 07:00"
 }
 ```
 
-`short_name` is used in “the Chromatic Codex is in stock!”.
+`short_name` is used in “the Chromatic Codex is in stock!”. `remind_on` is optional; omit it unless you want a same-day reminder for *that* watch.
 
 ### Movie or series release / tickets on sale
 
@@ -189,7 +206,7 @@ A full starter file is in [`config.example.json`](config.example.json).
 | 🟢 “Sold out” is no longer on the page | `text_disappears` |
 | 🟢 Price is US$180.00 (threshold US$200.00) | `price_below` |
 | 🔔 The page content changed | `changed` |
-| ⏰ Restock is today | Primary restock product only, on 19 November 2026 from 07:00 Mexico City time |
+| ⏰ Restock is today / Today is the expected date | Only if that watch has `remind_on` (or `expected_date` + `reminder`) and that date has been reached |
 | ☁️ Cloud watcher is active | Daily heartbeat (if the primary restock item is not in stock) |
 | ⚠️ I could not read … N times in a row | 5 consecutive failures (possible block). It keeps retrying, with longer waits |
 | ✅ Watcher recovered | It could read the page again after that block |
@@ -270,6 +287,8 @@ This repository’s live `config.json` includes the two restock products the pro
 3. In the left-hand list, open **Restockr**.
 4. Click **Run workflow**, choose `test`, and confirm.
 
+**Test mode** checks every page and sends **one** summary. It does not send regular stock/price/change alerts and does not read or write the live watcher’s `state.json` (it uses a throwaway file).
+
 Within a minute or two you should get **☁️ Restockr cloud watcher: active** on Telegram, with each item’s status. If that arrives, run the workflow again with `watch` so it keeps checking. The scheduled cron will also start it on its own.
 
 To evaluate pages locally without sending alerts:
@@ -297,10 +316,18 @@ These values live in the code, not in `config.json`. Change them in a commit if 
 | How often GitHub starts a run | `cron` in `.github/workflows/restockr.yml` | minutes 7, 27, and 47 of every hour |
 | Length of each run | `RUN_MINUTES` in the workflow | 340 minutes (~5 h 40 min) |
 | Daily heartbeat | `HEARTBEAT_HOUR` and `HEARTBEAT_MINUTE` in `restockr_core.py` | 09:00, `America/Mexico_City` |
-| “Restock is today” alert | `NOV19` in `restockr_core.py` | 19 November 2026, 07:00 Mexico City time, primary restock product only |
-| Automatic stop | `END_AT` in `restockr_core.py` | 21 November 2026, 23:59 Mexico City time |
+| Same-day reminder | `remind_on` or `expected_date` + `reminder` on the watch | Optional; date-only values fire at 07:00 Mexico City time |
+| How often config is reloaded | `CONFIG_RELOAD_S` in `restockr_core.py` | 300 seconds (from the repo, when `GITHUB_TOKEN` is available) |
 
-The GitHub cron does **not** check the page by itself: it only starts a run. Inside the run, the program checks every 1 to 2 minutes. If a run is still going, the next one waits in line (they do not cancel each other). If you want it to keep going after 21 November 2026, change `END_AT`.
+## How runs and state work
+
+The GitHub cron does **not** check pages by itself: it only starts a job. Inside the job, the program checks every 1 to 2 minutes for about 5 h 40 min (`RUN_MINUTES` is 340; the job timeout is 355 minutes, under GitHub’s 6-hour cap). State is written to `state.json` after each check, including undelivered alerts. On success, cancel, or timeout, the workflow uploads that file (Actions cache, plus an artifact as backup) **after** the watch step. The concurrency group (`restockr-watch`) allows only one active watch job; the next job waits until the current one — including the save step — has finished, so a new run should not start until state has been stored.
+
+GitHub keeps only **one pending run** per concurrency group and cancels older queued runs. If a job is still running when several cron ticks fire, you do not get a pile of backups — only one wait in line. If that pending run is dropped or a job dies before state is saved (rare hard failure), there can be a gap until the next cron (up to about 20 minutes). The process also handles `SIGTERM` by flushing pending alerts and saving state.
+
+Public scheduled workflows can be **disabled after 60 days of inactivity** (no pushes or other repo activity). Visit the Actions tab or push a commit to wake them.
+
+To stop: disable the workflow. There is no automatic end date.
 
 ## How to turn it off
 
@@ -333,16 +360,17 @@ In your repository: **Actions** → **Restockr** → the **…** menu → **Disa
 
 **It stopped running**
 - Check whether the workflow is disabled on the **Actions** tab.
-- If `END_AT` has passed, the program starts and exits immediately. Change that date if you want it to continue.
+- On a public repo, a scheduled workflow may have been paused after 60 days of inactivity — push a commit or re-enable it under Actions.
 
 ## Limitations
 
-- **GitHub Actions delays.** The `cron` schedule is not second-accurate; GitHub may lag.
+- **GitHub Actions delays and drops.** The `cron` schedule is not second-accurate; jobs can start late or, occasionally, be skipped. Only one pending run is kept per concurrency group.
+- **Six-hour job limit.** A single GitHub-hosted job cannot run longer than 6 hours. This project stays under that on purpose and chains via cron + concurrency. A crash before state is saved can lose in-progress delivery retries until the next successful restore.
+- **60-day inactivity.** On public repositories, scheduled workflows may be disabled after 60 days without repository activity. A push or a visit to Actions is enough to re-enable them.
 - **GitHub terms of use.** Actions is intended mainly for software-development work (tests, publishing code, and similar). Using it as a personal always-on service may fall outside that, and GitHub could limit or stop the workflow. Use it at your own risk.
 - **Bot protection and JavaScript.** The watcher downloads HTML with a Chrome-like request. It does not run a full browser session. Sites with Cloudflare, captchas, virtual queues, or pages that only fill in stock/price after JavaScript may fail. It warns after 5 consecutive failures and keeps retrying.
 - **What was actually tested.** Restock detection is tuned for OpenAI Supply Co. and the Disney Store (including Queue-it when the final host starts with `queue.`). Generic types were tested with simulated HTML, [example.com](https://example.com/) (`text_appears`, `text_disappears`, `changed`), and a public HTML shop ([books.toscrape.com](https://books.toscrape.com/)) for `price_below`. **Google Flights, airline sites, major hotel/booking sites, and streaming catalogs were not verified** and often will not work. Prefer pages that already show the information in the HTML, official release-date pages, or a documented API.
-- **Built-in end date.** This copy stops on 21 November 2026 until you change `END_AT`.
-- **State lives in the Actions cache.** It is not in the repository (and should not be committed). If the cache is lost, the watcher starts again from `state.seed.json` or from a blank state.
+- **State is not in the git tree.** It lives in the Actions cache (and a short-lived artifact). If both are gone, the watcher starts again from `state.seed.json` or from a blank state. Do not commit `state.json`.
 
 ## Privacy
 
