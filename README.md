@@ -1,132 +1,130 @@
 # Restockr
 
-**Creado por Jesús Molina ([@Moljesdev99](https://github.com/Moljesdev99))**
+**Created by Jesús Molina ([@Moljesdev99](https://github.com/Moljesdev99))**
 
-Vigilante de reposición **gratis**. Corre en [GitHub Actions](https://docs.github.com/es/actions) (computadoras que GitHub presta sin costo), revisa páginas de productos cada 1 a 2 minutos y te avisa por [Telegram](https://telegram.org/) cuando hay stock, cambia la fecha o, en Disney, se abre la fila virtual. Si quieres, también puede avisarte por [ntfy](https://ntfy.sh/).
+A **free** restock watcher. It runs on [GitHub Actions](https://docs.github.com/en/actions) (machines GitHub lends you at no charge), checks product pages every 1 to 2 minutes, and messages you on [Telegram](https://telegram.org/) when an item is in stock, the expected date changes, or — on Disney — a virtual queue opens. You can also receive the same alerts on [ntfy](https://ntfy.sh/).
 
-> **English:** Free restock watcher that runs on GitHub Actions and alerts you on Telegram (ntfy optional). Full guide: [README_EN.md](README_EN.md). Created by Jesús Molina ([@Moljesdev99](https://github.com/Moljesdev99)).
+## What it does
 
-## Qué hace
+- Checks one or more product pages, day and night, even if your computer is off.
+- Sends a **Telegram card** with a photo, status, price, expected date (when the page shows one), and a **🛒 Ver producto** button.
+- Optionally sends the same alert to ntfy.
+- Every day at **09:00 Mexico City time** (`America/Mexico_City`), it sends a heartbeat, as long as the primary product is not in stock.
+- It stops on its own on **21 November 2026** (a date hard-coded in the source; see below to change it).
 
-- Revisa una o más páginas de producto, de día y de noche, aunque tu computadora esté apagada.
-- Te manda una **tarjeta en Telegram** con foto, estado, precio, fecha prevista (si la página la muestra) y un botón **🛒 Ver producto**.
-- Opcionalmente envía el mismo aviso a ntfy.
-- Todos los días, a las **9:00 hora de México** (America/Mexico_City), te manda un mensaje de que sigue vivo, siempre que el producto principal no esté en stock.
-- Se apaga solo el **21 de noviembre de 2026** (fecha fija en el código; más abajo se explica cómo cambiarla).
+It is built mainly for **OpenAI Supply Co.** and the **Disney Store**. On other shops it may work if the page uses typical “out of stock” or “add to cart” wording or buttons, but that is not guaranteed.
 
-Está pensado sobre todo para **OpenAI Supply Co.** y **Disney Store**. En otras tiendas puede funcionar si la página muestra textos o botones típicos de “agotado” o “añadir al carrito”, pero no está garantizado.
-
-## Cómo funciona
+## How it works
 
 ```
 GitHub Actions
-  (cada 20 minutos empieza un turno de unas 5 h 40 min)
+  (every 20 minutes a run of about 5 h 40 min starts)
         │
         ▼
-  El programa abre cada página del producto
-  (una petición HTTPS que se hace pasar por Chrome)
-  y la vuelve a revisar cada 60–120 segundos
+  The program fetches each product page
+  (an HTTPS request that impersonates Chrome)
+  and checks again every 60–120 seconds
         │
-        ├─ Hay stock, cambió la fecha, se abrió la fila
-        │  virtual, se agotó de nuevo o no puede leer la página
+        ├─ In stock, date changed, virtual queue opened,
+        │  sold out again, or the page could not be read
         │         ▼
-        │    Telegram  (+ ntfy, si lo configuraste)
+        │    Telegram  (+ ntfy, if you configured it)
         │
-        └─ Una vez al día, a las 9:00 hora de México:
-              «☁️ Vigilante en la nube activo»
+        └─ Once a day, at 09:00 Mexico City time:
+              “☁️ Vigilante en la nube activo”
 ```
 
-No usa inteligencia artificial ni gasta tokens: es un programa que corre solo. Las claves del bot se guardan como **secretos de GitHub**, no en el código.
+It does not use AI and does not spend tokens. Bot credentials are stored as **GitHub Actions secrets**, not in the code.
 
-## Avisos que puedes recibir
+## Alerts you may receive
 
-| Aviso | Qué significa |
+| Alert | Meaning |
 |---|---|
-| ☁️ Restockr en la nube: activo | Arranque o prueba: pudo (o no) leer cada producto |
-| 🟢 ¡Ya hay stock! | El producto está disponible. Se repite cada 2 minutos, hasta 10 veces |
-| 📅 Cambió la fecha de restock | La página muestra una fecha prevista distinta a la anterior |
-| ⚪ Se agotó de nuevo | Estaba disponible y volvió a agotarse |
-| 🚦 ¡Abrió la fila virtual! Entra ya | La página redirigió a una sala de espera `queue.*` (como la de Disney). Hasta 3 avisos, cada 3 minutos |
-| ⏰ Hoy es el restock | Solo el producto marcado como principal, el 19 de noviembre de 2026 a partir de las 7:00 hora de México |
-| ☁️ Vigilante en la nube activo | Latido diario (si el producto principal no está en stock) |
-| ⚠️ No pude leer el producto N veces seguidas | Falló 5 veces seguidas (posible bloqueo). Sigue reintentando, con más espera |
-| ✅ Vigilante recuperado | Volvió a leer la página después de ese bloqueo |
+| ☁️ Restockr en la nube: activo | Startup or test run: whether each product page could be read |
+| 🟢 ¡Ya hay stock! | The product is available. Repeated every 2 minutes, up to 10 times |
+| 📅 Cambió la fecha de restock | The page now shows a different expected date |
+| ⚪ Se agotó de nuevo | It was in stock and sold out again |
+| 🚦 ¡Abrió la fila virtual! Entra ya | The page redirected to a `queue.*` waiting room (as Disney does). Up to 3 alerts, 3 minutes apart |
+| ⏰ Hoy es el restock | Primary product only, on 19 November 2026 from 07:00 Mexico City time |
+| ☁️ Vigilante en la nube activo | Daily heartbeat (if the primary product is not in stock) |
+| ⚠️ Could not read the product N times in a row | 5 consecutive failures (possible block). It keeps retrying, with longer waits |
+| ✅ Vigilante recuperado | It could read the page again after that block |
 
-Si un producto tiene `"is_test": true` en la configuración, sus avisos salen con el prefijo **🧪 Prueba**.
+If a product has `"is_test": true` in the config, its alerts are prefixed with **🧪 Prueba**.
 
-## Requisitos
+## Requirements
 
-- Una cuenta en [GitHub](https://github.com/signup). No hace falta tarjeta. El repositorio puede ser **público** (los minutos de Actions suelen ser ilimitados en el plan gratis) o **privado** (tienen un cupo mensual de minutos).
-- Una cuenta en [Telegram](https://telegram.org/).
-- Unas 15 minutos para el armado inicial.
+- A [GitHub](https://github.com/signup) account. No credit card is required. The repository can be **public** (Actions minutes are generally unlimited on the free plan) or **private** (monthly minute quota).
+- A [Telegram](https://telegram.org/) account.
+- About 15 minutes for the initial setup.
 
-## Cómo montarlo (paso a paso)
+## Setup (step by step)
 
-### 1. Crea tu propia copia del proyecto
+### 1. Create your own copy of the project
 
-1. Entra a [https://github.com/Moljesdev99/restockr](https://github.com/Moljesdev99/restockr) (inicia sesión en GitHub).
-2. Pulsa el botón verde **Use this template** → **Create a new repository**.
-   - Si no ves ese botón, pulsa **Fork**.
-3. Ponle un nombre (por ejemplo `restockr`), déjalo **Public** si quieres aprovechar los minutos gratis, y crea el repositorio.
+1. Open [https://github.com/Moljesdev99/restockr](https://github.com/Moljesdev99/restockr) (sign in to GitHub).
+2. Click the green **Use this template** button → **Create a new repository**.
+   - If you do not see that button, click **Fork**.
+3. Choose a name (for example `restockr`), leave it **Public** if you want the free Actions minutes, and create the repository.
 
-Así el código queda en *tu* cuenta. Los avisos te llegarán a ti, no al autor.
+The code then lives under *your* account. Alerts go to you, not to the author.
 
-### 2. Crea un bot en Telegram
+### 2. Create a Telegram bot
 
-1. En Telegram, abre [@BotFather](https://t.me/BotFather) y envía `/newbot`.
-2. Elige un nombre (el que se ve en el chat, por ejemplo `Restockr`) y un nombre de usuario que termine en `bot`.
-3. BotFather te da un **token** (una clave larga). Cópiala y guárdala en un lugar seguro. **No la compartas ni la subas al repositorio.**
-4. Abre tu bot nuevo (el enlace que te dio BotFather) y pulsa **Start** o envía `/start`. Sin este paso, el bot no puede escribirte.
+1. In Telegram, open [@BotFather](https://t.me/BotFather) and send `/newbot`.
+2. Choose a display name (for example `Restockr`) and a username that ends in `bot`.
+3. BotFather gives you a **token**. Copy it and keep it private. **Do not share it or commit it to the repository.**
+4. Open your new bot (the link BotFather gave you) and tap **Start** or send `/start`. Without this step, the bot cannot message you.
 
-### 3. Averigua tu chat id
+### 3. Find your chat id
 
-1. Envíale cualquier mensaje a tu bot (si aún no lo hiciste, `/start` basta).
-2. En el navegador, abre esta dirección, reemplazando `TU_TOKEN` por el token del paso anterior:
+1. Send any message to your bot (`/start` is enough).
+2. In a browser, open this URL, replacing `YOUR_TOKEN` with the token from the previous step:
 
-   `https://api.telegram.org/botTU_TOKEN/getUpdates`
+   `https://api.telegram.org/botYOUR_TOKEN/getUpdates`
 
-3. En el texto que aparece, busca algo como `"chat":{"id": 123456789`. Ese número es tu **chat id**.
-   - En un chat personal suele ser un número positivo.
-   - En un grupo suele ser un número negativo. Si usas un grupo, invita al bot y escribe un mensaje ahí antes de abrir el enlace.
+3. In the text that appears, look for something like `"chat":{"id": 123456789`. That number is your **chat id**.
+   - In a private chat it is usually a positive number.
+   - In a group it is usually negative. If you use a group, invite the bot and send a message there before opening the URL.
 
-Si la página muestra `"ok":true,"result":[]`, vuelve a enviarle un mensaje al bot y recarga.
+If the page shows `"ok":true,"result":[]`, send the bot another message and reload.
 
-### 4. (Opcional) Prepara ntfy
+### 4. (Optional) Set up ntfy
 
-ntfy es un respaldo: te llega un aviso en el teléfono aunque Telegram falle.
+ntfy is a backup channel if Telegram fails.
 
-1. Inventa un nombre de tema **largo y difícil de adivinar**, como una contraseña. Quien conozca ese nombre puede leer tus avisos en ntfy.sh.
-2. Suscríbete a ese tema en la [app de ntfy](https://ntfy.sh/) o en `https://ntfy.sh/TU_TEMA`.
-3. Más adelante lo guardarás como el secreto `NTFY_TOPIC`. Si no lo configuras, el vigilante solo usa Telegram.
+1. Invent a **long, hard-to-guess** topic name, like a password. Anyone who knows that name can read your alerts on ntfy.sh.
+2. Subscribe to that topic in the [ntfy app](https://ntfy.sh/) or at `https://ntfy.sh/YOUR_TOPIC`.
+3. You will store it later as the `NTFY_TOPIC` secret. If you skip this, the watcher uses Telegram only.
 
-### 5. Guarda las claves como secretos de GitHub
+### 5. Store the keys as GitHub secrets
 
-En *tu* repositorio:
+In *your* repository:
 
-1. Ve a **Settings** → **Secrets and variables** → **Actions**.
-2. Pulsa **New repository secret** y crea estos dos (los nombres tienen que coincidir exactamente):
+1. Go to **Settings** → **Secrets and variables** → **Actions**.
+2. Click **New repository secret** and create these two (the names must match exactly):
 
-   | Nombre | Valor |
+   | Name | Value |
    |---|---|
-   | `TG_TOKEN` | El token que te dio BotFather |
-   | `TG_CHAT` | Tu chat id (solo el número) |
+   | `TG_TOKEN` | The token BotFather gave you |
+   | `TG_CHAT` | Your chat id (the number only) |
 
-3. Si usas ntfy, crea también `NTFY_TOPIC` con el nombre de tu tema.
+3. If you use ntfy, also create `NTFY_TOPIC` with your topic name.
 
-Nunca pongas estas claves en `config.json`, en el README ni en un comentario.
+Never put these values in `config.json`, in the README, or in a commit message.
 
-### 6. Pon tus productos en `config.json`
+### 6. Put your products in `config.json`
 
-En tu repositorio, abre `config.json` → el lápiz de editar. Puedes partir de [`config.example.json`](config.example.json). Deja una lista como esta:
+In your repository, open `config.json` → the pencil icon. You can start from [`config.example.json`](config.example.json). Use a list like this:
 
 ```json
 {
   "products": [
     {
-      "id": "mi-producto",
-      "name": "Nombre completo del producto",
-      "short_name": "el producto",
-      "url": "https://tienda.ejemplo.com/producto",
+      "id": "my-product",
+      "name": "Full product name",
+      "short_name": "the product",
+      "url": "https://store.example.com/product",
       "emoji": "🎮",
       "is_test": false,
       "primary": true
@@ -135,104 +133,104 @@ En tu repositorio, abre `config.json` → el lápiz de editar. Puedes partir de 
 }
 ```
 
-| Campo | Obligatorio | Qué es |
+| Field | Required | Meaning |
 |---|---|---|
-| `id` | Sí | Identificador corto, sin espacios, único (ejemplo: `chromatic`) |
-| `url` | Sí | Enlace a la página del producto |
-| `name` | No | Nombre que aparece en la tarjeta. Si lo omites, se usa el `id` |
-| `short_name` | No | Se usa en «¡Ya hay stock de …!». Si lo omites, se usa `name` |
-| `emoji` | No | Emoji de la tarjeta. Por defecto 🎮 |
-| `is_test` | No | `true` marca los avisos como 🧪 Prueba. Por defecto `false` |
-| `primary` | No | `true` en **un** producto: recibe el latido diario y el aviso del 19 de noviembre. Si ninguno lo tiene, se usa el primero de la lista |
+| `id` | Yes | Short unique id, no spaces (example: `chromatic`) |
+| `url` | Yes | Product page URL |
+| `name` | No | Name shown on the card. Defaults to `id` |
+| `short_name` | No | Used in “¡Ya hay stock de …!”. Defaults to `name` |
+| `emoji` | No | Card emoji. Defaults to 🎮 |
+| `is_test` | No | `true` marks alerts as 🧪 Prueba. Defaults to `false` |
+| `primary` | No | Set `true` on **one** product: it receives the daily heartbeat and the 19 November heads-up. If none is set, the first item in the list is used |
 
-Puedes añadir más objetos dentro de `products`. Luego pulsa **Commit changes**.
+You can add more objects inside `products`. Then click **Commit changes**.
 
-En este repositorio, `config.json` trae de ejemplo los dos productos con los que se probó el vigilante (Chromatic Codex y el sable de Disney). Cámbialos por los tuyos.
+This repository’s `config.json` includes the two products the watcher was tested with (Chromatic Codex and the Disney lightsaber). Replace them with yours.
 
-### 7. Activa GitHub Actions y haz una prueba
+### 7. Enable GitHub Actions and run a test
 
-1. En tu repositorio, abre la pestaña **Actions**.
-2. Si GitHub pide confirmar que confías en los flujos de trabajo, acepta.
-3. En la lista de la izquierda, entra a **Restockr**.
-4. Pulsa **Run workflow**, elige `test` y confirma.
+1. In your repository, open the **Actions** tab.
+2. If GitHub asks you to confirm that you trust the workflows, accept.
+3. In the left-hand list, open **Restockr**.
+4. Click **Run workflow**, choose `test`, and confirm.
 
-En uno o dos minutos deberías recibir en Telegram **☁️ Restockr en la nube: activo**, con el estado de cada producto. Si llega, vuelve a **Run workflow**, esta vez con `watch`, para dejarlo vigilando. El horario programado también lo irá arrancando solo.
+Within a minute or two you should get **☁️ Restockr en la nube: activo** on Telegram, with each product’s status. If that arrives, run the workflow again with `watch` so it keeps checking. The scheduled cron will also start it on its own.
 
-## Añadir o quitar productos
+## Adding or removing products
 
-Edita `config.json`, deja o borra entradas en `products`, y haz **Commit**. El cambio se aplica en la siguiente corrida.
+Edit `config.json`, add or delete entries in `products`, and **Commit**. The change applies on the next run.
 
-No hace falta tocar `state.seed.json`. Ese archivo solo sirve como estado inicial la primera vez (o si GitHub pierde la memoria entre corridas). Si cambias de productos, puedes dejarlo o borrarlo; los productos nuevos empiezan con estado en blanco.
+You do not need to edit `state.seed.json`. That file is only an initial state the first time (or if GitHub drops memory between runs). If you switch products, you can leave it or delete it; new products start with a blank state.
 
-## Personalizar la frecuencia y las fechas
+## Customizing frequency and dates
 
-Estos valores están en el código, no en `config.json`. Cámbialos con un commit si los necesitas distintos:
+These values live in the code, not in `config.json`. Change them in a commit if you need something different:
 
-| Qué | Dónde | Valor actual |
+| What | Where | Current value |
 |---|---|---|
-| Pausa entre revisiones | `CHECK_MIN_S` y `CHECK_MAX_S` en `restockr_core.py` | 60 a 120 segundos |
-| Cada cuánto GitHub inicia un turno | `cron` en `.github/workflows/restockr.yml` | minutos 7, 27 y 47 de cada hora |
-| Duración de cada turno | `RUN_MINUTES` en el flujo de trabajo | 340 minutos (~5 h 40 min) |
-| Latido diario | `HEARTBEAT_HOUR` y `HEARTBEAT_MINUTE` en `restockr_core.py` | 9:00, zona `America/Mexico_City` |
-| Aviso «Hoy es el restock» | `NOV19` en `restockr_core.py` | 19 de noviembre de 2026, 7:00 hora de México, solo el producto principal |
-| Apagado automático | `END_AT` en `restockr_core.py` | 21 de noviembre de 2026, 23:59 hora de México |
+| Pause between checks | `CHECK_MIN_S` and `CHECK_MAX_S` in `restockr_core.py` | 60 to 120 seconds |
+| How often GitHub starts a run | `cron` in `.github/workflows/restockr.yml` | minutes 7, 27, and 47 of every hour |
+| Length of each run | `RUN_MINUTES` in the workflow | 340 minutes (~5 h 40 min) |
+| Daily heartbeat | `HEARTBEAT_HOUR` and `HEARTBEAT_MINUTE` in `restockr_core.py` | 09:00, `America/Mexico_City` |
+| “Hoy es el restock” alert | `NOV19` in `restockr_core.py` | 19 November 2026, 07:00 Mexico City time, primary product only |
+| Automatic stop | `END_AT` in `restockr_core.py` | 21 November 2026, 23:59 Mexico City time |
 
-El cron de GitHub **no** revisa el producto por sí solo: solo arranca un turno. Dentro del turno, el programa revisa cada 1 a 2 minutos. Si un turno sigue en marcha, el siguiente espera su lugar (no se cancelan entre sí). Si quieres que siga después del 21 de noviembre de 2026, cambia `END_AT`.
+The GitHub cron does **not** check the product by itself: it only starts a run. Inside the run, the program checks every 1 to 2 minutes. If a run is still going, the next one waits in line (they do not cancel each other). If you want it to keep going after 21 November 2026, change `END_AT`.
 
-## Cómo apagarlo
+## How to turn it off
 
-En tu repositorio: **Actions** → **Restockr** → el menú **…** → **Disable workflow**.
+In your repository: **Actions** → **Restockr** → the **…** menu → **Disable workflow**.
 
-## Solución de problemas
+## Troubleshooting
 
-**No me llegó el mensaje de prueba**
-- Confirma que los secretos se llaman exactamente `TG_TOKEN` y `TG_CHAT`.
-- Confirma que le enviaste `/start` a tu bot.
-- Abre **Actions** → la corrida más reciente → el paso **Watch** y lee si aparece un error (por ejemplo, “Missing TG_TOKEN / TG_CHAT”).
+**I did not get the test message**
+- Confirm the secrets are named exactly `TG_TOKEN` and `TG_CHAT`.
+- Confirm you sent `/start` to your bot.
+- Open **Actions** → the latest run → the **Watch** step and look for an error (for example “Missing TG_TOKEN / TG_CHAT”).
 
-**El mensaje dice que no pudo leer una página**
-- La tienda puede estar bloqueando al vigilante (Cloudflare u otra protección).
-- La página puede depender de mucho JavaScript, o no usar textos/botones que el programa reconoce.
-- Prueba primero con una página de OpenAI Supply o de Disney Store, que son las que ya se comprobaron.
+**The message says it could not read a page**
+- The shop may be blocking the watcher (Cloudflare or similar).
+- The page may depend on heavy JavaScript, or may not use wording/buttons the program recognizes.
+- Try an OpenAI Supply or Disney Store page first; those are the ones already verified.
 
-**El aviso de stock llegó tarde**
-- El cron de GitHub Actions a veces se atrasa varios minutos.
-- Si un turno falla o termina antes de tiempo, puede haber un hueco hasta el siguiente.
+**The in-stock alert arrived late**
+- GitHub Actions cron jobs are sometimes delayed by several minutes.
+- If a run fails or ends early, there can be a gap until the next one.
 
-**Me llegan avisos repetidos**
-- Suele pasar si también corre otra copia del vigilante (por ejemplo, en otra computadora o en otro repositorio).
-- Si GitHub pierde la memoria entre corridas (`state.json`), algunos avisos pueden volver a salir una vez.
+**I am getting duplicate alerts**
+- This often happens if another copy of the watcher is also running (another computer or another repository).
+- If GitHub drops memory between runs (`state.json`), some alerts may fire once more.
 
-**ntfy no llega**
-- El secreto `NTFY_TOPIC` es opcional: si no está, solo se usa Telegram.
-- Revisa que el nombre del tema coincida exactamente y que estés suscrito a ese mismo tema.
-- El plan gratis de ntfy.sh limita cuántos mensajes puedes recibir al día.
+**ntfy is not arriving**
+- The `NTFY_TOPIC` secret is optional: if it is missing, only Telegram is used.
+- Check that the topic name matches exactly and that you are subscribed to that same topic.
+- ntfy.sh’s free plan limits how many messages you can receive per day.
 
-**Dejó de correr**
-- Mira si el flujo está desactivado en la pestaña **Actions**.
-- Si ya pasó la fecha de `END_AT`, el programa arranca y sale de inmediato. Cambia esa fecha si quieres que continúe.
+**It stopped running**
+- Check whether the workflow is disabled on the **Actions** tab.
+- If `END_AT` has passed, the program starts and exits immediately. Change that date if you want it to continue.
 
-## Limitaciones
+## Limitations
 
-- **Retrasos de GitHub Actions.** El horario `cron` no es exacto al segundo; GitHub puede atrasarlo.
-- **Condiciones de uso de GitHub.** Actions está pensado sobre todo para proyectos de programación (pruebas, publicación de código, etc.). Usarlo como un servicio personal siempre encendido puede salirse de ese uso, y GitHub podría limitar o cortar el flujo. Úsalo bajo tu responsabilidad.
-- **Protección contra bots.** Tiendas con Cloudflare, captchas u otras barreras pueden impedir la lectura. El programa avisa si falla 5 veces seguidas, y sigue intentándolo.
-- **No es un monitor universal.** La detección está afinada para OpenAI Supply Co. y Disney Store (incluido el cuarto de espera Queue-it, cuando la dirección final empieza por `queue.`). En otras webs el resultado es incierto.
-- **Fecha de corte incluida.** Esta copia se detiene el 21 de noviembre de 2026 hasta que cambies `END_AT`.
-- **El estado vive en la caché de Actions.** No está en el repositorio (y no debe subirse). Si la caché se pierde, el vigilante vuelve a partir de `state.seed.json` o de un estado en blanco.
+- **GitHub Actions delays.** The `cron` schedule is not second-accurate; GitHub may lag.
+- **GitHub terms of use.** Actions is intended mainly for software-development work (tests, publishing code, and similar). Using it as a personal always-on service may fall outside that, and GitHub could limit or stop the workflow. Use it at your own risk.
+- **Bot protection.** Shops with Cloudflare, captchas, or other barriers may block the checker. The program warns after 5 consecutive failures and keeps retrying.
+- **Not a universal monitor.** Detection is tuned for OpenAI Supply Co. and the Disney Store (including the Queue-it waiting room, when the final host starts with `queue.`). On other sites the result is uncertain.
+- **Built-in end date.** This copy stops on 21 November 2026 until you change `END_AT`.
+- **State lives in the Actions cache.** It is not in the repository (and should not be committed). If the cache is lost, the watcher starts again from `state.seed.json` or from a blank state.
 
-## Privacidad
+## Privacy
 
-- **Nunca subas** el token del bot, el chat id ni el tema de ntfy al repositorio, ni los escribas en issues o en el README.
-- Guárdalos solo como secretos de GitHub (**Settings** → **Secrets and variables** → **Actions**).
-- Si el repositorio es público, otras personas verán tu `config.json` (nombres y enlaces de productos). Las claves, no.
-- El tema de ntfy funciona como una contraseña: elige uno largo y no lo publiques.
-- El archivo [`.gitignore`](.gitignore) ignora `state.json`, registros y archivos típicos de claves locales (`.tg_token`, `.tg_chat`, `.env`).
+- **Never commit** the bot token, chat id, or ntfy topic to the repository, and do not paste them into issues or the README.
+- Store them only as GitHub secrets (**Settings** → **Secrets and variables** → **Actions**).
+- If the repository is public, other people can see your `config.json` (product names and URLs). They cannot see the secrets.
+- The ntfy topic works like a password: choose a long one and do not publish it.
+- [`.gitignore`](.gitignore) ignores `state.json`, logs, and typical local credential files (`.tg_token`, `.tg_chat`, `.env`).
 
-## Licencia
+## License
 
 [MIT](LICENSE). Copyright © 2026 Jesús Molina.
 
 ---
 
-**Creado por Jesús Molina ([@Moljesdev99](https://github.com/Moljesdev99))**
+**Created by Jesús Molina ([@Moljesdev99](https://github.com/Moljesdev99))**

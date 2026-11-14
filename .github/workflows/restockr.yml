@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "watch = vigilar normal · test = solo mandar mensaje de prueba"
+        description: "watch = normal watch · test = only send a test message"
         type: choice
         options: [watch, test]
         default: watch

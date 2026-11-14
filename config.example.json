@@ -1,19 +1,19 @@
 {
   "products": [
     {
-      "id": "producto-1",
-      "name": "Nombre del producto",
-      "short_name": "el producto",
-      "url": "https://tienda.ejemplo.com/producto",
+      "id": "product-1",
+      "name": "Product name",
+      "short_name": "the product",
+      "url": "https://store.example.com/product",
       "emoji": "🎮",
       "is_test": false,
       "primary": true
     },
     {
-      "id": "producto-2",
-      "name": "Otro producto",
-      "short_name": "el otro producto",
-      "url": "https://tienda.ejemplo.com/otro",
+      "id": "product-2",
+      "name": "Another product",
+      "short_name": "the other product",
+      "url": "https://store.example.com/another",
       "emoji": "⚔️",
       "is_test": false,
       "primary": false
