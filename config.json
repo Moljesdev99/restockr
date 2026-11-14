@@ -1,0 +1,23 @@
+{
+  "product_url": "https://openai.com/supply/co-lab/chromatic/",
+  "products": [
+    {
+      "id": "chromatic",
+      "name": "Game Boy Chromatic Codex",
+      "short_name": "la Chromatic Codex",
+      "url": "https://openai.com/supply/co-lab/chromatic/",
+      "emoji": "🎮",
+      "is_test": false,
+      "primary": true
+    },
+    {
+      "id": "disney-ezra",
+      "name": "Ezra Legacy Lightsaber Set",
+      "short_name": "el Ezra Legacy Lightsaber Set",
+      "url": "https://www.disneystore.com/ezra-legacy-lightsaber-set-star-wars-rebels-limited-edition-418149061750.html",
+      "emoji": "⚔️",
+      "is_test": false,
+      "primary": false
+    }
+  ]
+}

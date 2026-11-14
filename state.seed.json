@@ -1,0 +1,44 @@
+{
+  "test_sent": true,
+  "heartbeat_dates": [],
+  "nov19_heads_up_sent": false,
+  "products": {
+    "chromatic": {
+      "last_status": "out_of_stock",
+      "last_expected_restock": "November 19",
+      "in_stock_alerts_sent": 0,
+      "last_in_stock_alert_ts": null,
+      "blocked_warning_sent": false,
+      "consecutive_failures": 0,
+      "successful_checks": 54,
+      "product_image_url": "https://images.ctfassets.net/kftzwdyauwt9/1WCanlguEnichiUTuuX2EW/a6a226941649d6598c26b51c3a509420/modretro-chromatic-codex-edition-social.png?w=1600&h=900&fit=fill",
+      "product_description": "Crea tus propios juegos con Codex, cárgalos en un cartucho y júegalos en esta portátil.",
+      "product_price": "US$200.00",
+      "intro_test_sent": false
+    },
+    "disney-ezra": {
+      "last_status": "out_of_stock",
+      "last_expected_restock": "November 17",
+      "in_stock_alerts_sent": 0,
+      "last_in_stock_alert_ts": null,
+      "blocked_warning_sent": false,
+      "consecutive_failures": 0,
+      "successful_checks": 27,
+      "product_image_url": "https://cdn-ssl.s7.shopdisney.com/is/image/DisneyShopping/1814047620207",
+      "product_description": "Set limitado con dos empuñaduras Legacy de Ezra Bridger, con sonido e iluminación.",
+      "product_price": "US$400.00",
+      "intro_test_sent": false
+    }
+  },
+  "last_status": "out_of_stock",
+  "last_expected_restock": "November 19",
+  "in_stock_alerts_sent": 0,
+  "last_in_stock_alert_ts": null,
+  "blocked_warning_sent": false,
+  "consecutive_failures": 0,
+  "successful_checks": 54,
+  "product_image_url": "https://images.ctfassets.net/kftzwdyauwt9/1WCanlguEnichiUTuuX2EW/a6a226941649d6598c26b51c3a509420/modretro-chromatic-codex-edition-social.png?w=1600&h=900&fit=fill",
+  "product_description": "Crea tus propios juegos con Codex, cárgalos en un cartucho y júegalos en esta portátil.",
+  "product_price": "US$200.00",
+  "intro_test_sent": false
+}

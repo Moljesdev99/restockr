@@ -1,0 +1,57 @@
+name: Restockr
+
+on:
+  schedule:
+    # Every 20 min (odd minutes avoid GitHub's busy :00). Only one run checks at a
+    # time; the next one waits in line and starts the moment the current ends.
+    - cron: "7,27,47 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "watch = vigilar normal · test = solo mandar mensaje de prueba"
+        type: choice
+        options: [watch, test]
+        default: watch
+
+concurrency:
+  group: restockr-${{ github.event.inputs.mode == 'test' && 'test' || 'watch' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt
+
+      - name: Restore last state
+        uses: actions/cache/restore@v6
+        with:
+          path: state.json
+          key: restockr-state-${{ github.run_id }}
+          restore-keys: restockr-state-
+
+      - name: Watch
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          MODE: ${{ github.event.inputs.mode || 'watch' }}
+          RUN_MINUTES: "340"
+          PYTHONUNBUFFERED: "1"
+        run: .venv/bin/python restockr.py
+
+      - name: Save state
+        if: always() && (github.event.inputs.mode || 'watch') == 'watch'
+        uses: actions/cache/save@v6
+        with:
+          path: state.json
+          key: restockr-state-${{ github.run_id }}
