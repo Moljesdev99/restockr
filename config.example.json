@@ -1,0 +1,22 @@
+{
+  "products": [
+    {
+      "id": "producto-1",
+      "name": "Nombre del producto",
+      "short_name": "el producto",
+      "url": "https://tienda.ejemplo.com/producto",
+      "emoji": "🎮",
+      "is_test": false,
+      "primary": true
+    },
+    {
+      "id": "producto-2",
+      "name": "Otro producto",
+      "short_name": "el otro producto",
+      "url": "https://tienda.ejemplo.com/otro",
+      "emoji": "⚔️",
+      "is_test": false,
+      "primary": false
+    }
+  ]
+}

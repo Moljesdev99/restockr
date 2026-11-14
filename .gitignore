@@ -1,4 +1,16 @@
 state.json
 watch.log
+watch.log.1
 .venv/
 __pycache__/
+*.pyc
+config.runtime.json
+
+# Local secrets — never commit these
+.tg_token
+.tg_chat
+.env
+.env.*
+
+# Local-only deploy helper (not for publishing)
+deploy.sh
