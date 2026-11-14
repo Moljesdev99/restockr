@@ -753,9 +753,7 @@ def card_headline(
     name = product.get("name") or "Producto"
     emoji = product.get("emoji") or "🎮"
     short = product.get("short_name") or name
-    if status == "in_stock":
-        head = f"🟢 {short} is in stock!"
-    elif event_line:
+    if event_line and status != "in_stock":
         head = re.sub(r"</?b>", "", event_line)
     else:
         head = f"{emoji} {name}"
@@ -781,6 +779,8 @@ def build_caption(
     price = info.get("price") or state.get("product_price") or "To be confirmed"
     description = info.get("description") or state.get("product_description") or info.get("snippet")
     estado = status_label(status, expected)
+    if status == "in_stock":
+        estado = "🟢 In stock, buy now!"
     fecha = format_date(expected)
     name = product.get("name") or "Watch"
     emoji = product.get("emoji") or "🎮"
@@ -792,9 +792,7 @@ def build_caption(
     lines: list[str] = []
     if test:
         lines.append(f"🧪 {_bold('Test', markup)}")
-    if status == "in_stock":
-        lines.append(f"🟢 {_bold(f'{short} is in stock!', markup)}")
-    elif event_line:
+    if status != "in_stock" and event_line:
         # event_line is stored as HTML; convert if needed
         ev = event_line
         if markup == "md":
@@ -805,10 +803,10 @@ def build_caption(
         lines.append(f"✨ {_esc(description, markup)}")
     lines.append("")
     lines.append(f"📦 {_bold('Status:', markup)} {_esc(estado, markup)}")
-    if restock:
+    if restock and status != "in_stock":
         if fecha:
             lines.append(f"📅 {_bold('Expected date:', markup)} {_esc(fecha, markup)}")
-        elif status != "in_stock":
+        else:
             lines.append(f"📅 {_bold('Expected date:', markup)} To be confirmed")
     if price and price != "To be confirmed":
         lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")

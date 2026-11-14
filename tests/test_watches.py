@@ -117,10 +117,28 @@ class TestEnglishMessages(unittest.TestCase):
         self.assertEqual(core.format_date("Nov 17"), "November 17")
         info = ev(SUPPLY_IN_STOCK, restock_entry())
         cap = core.build_caption(info, {}, product=restock_entry())
-        self.assertIn("is in stock!", cap)
+        self.assertIn("📦", cap)
+        self.assertIn("🟢 In stock, buy now!", cap)
+        self.assertNotIn("is in stock!", cap)
+        self.assertNotIn("Expected date:", cap)
+        self.assertTrue(cap.strip().startswith("🎮"))
         self.assertIn("Status:", cap)
         self.assertIn("Price:", cap)
         self.assertNotRegex(cap, r"[ÁÉÍÓÚáéíóúñÑ¡¿]")
+        # Coming-soon card still shows the expected date and has no buy-now status
+        oos = ev(SUPPLY_OOS, restock_entry())
+        oos_cap = core.build_caption(oos, {}, product=restock_entry())
+        self.assertIn("Coming soon", oos_cap)
+        self.assertIn("Expected date:", oos_cap)
+        self.assertNotIn("In stock, buy now!", oos_cap)
+        md = core.build_caption(info, {}, product=restock_entry(), markup="md")
+        self.assertIn("**Status:**", md)
+        self.assertIn("🟢 In stock, buy now!", md)
+        self.assertNotIn("is in stock!", md)
+        self.assertEqual(
+            core.card_headline(restock_entry(), info),
+            "🎮 Game Boy Chromatic Codex",
+        )
         self.assertEqual(core.button_label(restock_entry()), "🛒 View product")
         self.assertEqual(
             core.button_label({"id": "x", "url": "https://e.com", "type": "changed"}),

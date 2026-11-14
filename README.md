@@ -89,7 +89,7 @@ Copy an example into your `config.json`, then put **your** URL and wording. The 
 }
 ```
 
-`short_name` is used in “the Chromatic Codex is in stock!”. `remind_on` is optional; omit it unless you want a same-day reminder for *that* watch.
+`short_name` is a short form of the product name. `remind_on` is optional; omit it unless you want a same-day reminder for *that* watch.
 
 ### Movie or series release / tickets on sale
 
@@ -198,7 +198,7 @@ A full starter file is in [`config.example.json`](config.example.json).
 | Alert | Meaning |
 |---|---|
 | ☁️ Restockr cloud watcher: active | Startup or test run: whether each page could be read |
-| 🟢 … is in stock! | Restock: the product is available. Repeated every 2 minutes, up to 10 times |
+| 📦 Status: 🟢 In stock, buy now! | Restock: the product is available. Repeated every 2 minutes, up to 10 times |
 | 📅 Restock date changed | The page now shows a different expected date |
 | ⚪ Sold out again | It was in stock and sold out again |
 | 🚦 The virtual waiting room is open! Join now | Restock: the page redirected to a `queue.*` host (as Disney does). Up to 3 alerts, 3 minutes apart |
