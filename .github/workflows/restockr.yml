@@ -3,10 +3,11 @@ name: Restockr
 on:
   schedule:
     # Every 20 min (odd minutes avoid GitHub's busy :00). The concurrency group
-    # keeps only one watch run active. A second run may wait, but GitHub keeps
-    # only one *pending* run per group and drops older queued ones — so a long
-    # run plus delayed cron can still leave a short gap. The next start always
-    # waits until this workflow (including state save) has finished.
+    # keeps only one watch run active. A successful or cancelled watch also
+    # dispatches the next run so the handoff does not wait for cron. GitHub
+    # keeps only one *pending* run per group and drops older queued ones.
+    # The next start always waits until this workflow (including state save)
+    # has finished.
     - cron: "7,27,47 * * * *"
   workflow_dispatch:
     inputs:
@@ -22,7 +23,7 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 jobs:
   watch:
@@ -54,6 +55,7 @@ jobs:
         run: bash scripts/restore_state_artifact.sh
 
       - name: Watch
+        id: watch
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
@@ -79,3 +81,13 @@ jobs:
           path: state.json
           retention-days: 14
           if-no-files-found: ignore
+
+      # Queue the next watch immediately after this job (including state save)
+      # finishes. Concurrency still allows only one active watch. Cron remains
+      # as a backup if this dispatch is skipped (failed/short runs).
+      - name: Queue the next watch run
+        if: ${{ always() && (github.event.inputs.mode || 'watch') == 'watch' && (steps.watch.conclusion == 'success' || steps.watch.conclusion == 'cancelled') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: gh workflow run restockr.yml --ref "$GITHUB_REF_NAME" -f mode=watch

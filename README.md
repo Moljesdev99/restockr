@@ -2,7 +2,7 @@
 
 **Created by Jesús Molina ([@Moljesdev99](https://github.com/Moljesdev99))**
 
-A **free, general-purpose web watcher**. It runs on [GitHub Actions](https://docs.github.com/en/actions), checks the pages you care about every 1 to 2 minutes, and messages you on [Telegram](https://telegram.org/) when something changes — a product comes back in stock, a price drops, tickets go on sale, a release date appears, a hotel is no longer sold out, or any other text on a page appears, disappears, or changes. You can also receive the same alerts on [ntfy](https://ntfy.sh/).
+A **free, general-purpose web watcher**. It runs on [GitHub Actions](https://docs.github.com/en/actions), checks the pages you care about every 1 to 2 minutes (every 60–75 seconds on a watch's reminder day), and messages you on [Telegram](https://telegram.org/) when something changes — a product comes back in stock, a price drops, tickets go on sale, a release date appears, a hotel is no longer sold out, or any other text on a page appears, disappears, or changes. You can also receive the same alerts on [ntfy](https://ntfy.sh/).
 
 It is not limited to shop restocks. Restocks are one watch type among several.
 
@@ -21,12 +21,14 @@ The **restock** type is tested with **OpenAI Supply Co.** and the **Disney Store
 
 ```
 GitHub Actions
-  (every 20 minutes a run of about 5 h 40 min starts)
+  (a ~5 h 40 min run; the next one is queued when it finishes,
+   and a 20-minute cron is the backup starter)
         │
         ▼
   The program fetches each watched page
   (an HTTPS request that impersonates Chrome)
   and checks again every 60–120 seconds
+  (60–75 seconds on a reminder day, Paraguay time)
         │
         ├─ Stock, price, text, or content matches your rule
         │  (or a virtual waiting room opens, or the page cannot be read)
@@ -58,8 +60,10 @@ Common fields on every entry: `id`, `name`, `url`, `type`, `emoji`, optional `im
 
 Optional reminder (only if you set it; nothing is hard-coded to a product or date):
 
-- `remind_on`: `"2026-11-19"` (fires at 07:00 Mexico City time) or `"2026-11-19 07:00"`
+- `remind_on`: `"2026-11-19"` (fires at 07:00 Paraguay time, `America/Asuncion`, labeled PYT) or `"2026-11-19 07:00"`
+- optional `timezone` on the same watch (an IANA name such as `America/Mexico_City`) to interpret a naive `remind_on` time in that zone instead of Paraguay time
 - or `expected_date`: `"2026-11-19"` together with `"reminder": true`
+- an explicit UTC offset in `remind_on` (for example `"2026-11-19 07:00-03:00"`) is honored as-is
 
 Other parameters can go in a `params` object or directly on the entry: `text`, `pattern`, `selector`, `threshold`, `currency`, `json_path`, `ignore`, `inclusive`.
 
@@ -313,18 +317,18 @@ These values live in the code, not in `config.json`. Change them in a commit if 
 
 | What | Where | Current value |
 |---|---|---|
-| Pause between checks | `CHECK_MIN_S` and `CHECK_MAX_S` in `restockr_core.py` | 60 to 120 seconds |
-| How often GitHub starts a run | `cron` in `.github/workflows/restockr.yml` | minutes 7, 27, and 47 of every hour |
+| Pause between checks | `CHECK_MIN_S` and `CHECK_MAX_S` in `restockr_core.py` | 60 to 120 seconds (tightens to 60–75 seconds on a watch's reminder day in Paraguay time) |
+| How often GitHub starts a run | `cron` in `.github/workflows/restockr.yml`, plus a dispatch at the end of each successful or cancelled watch | minutes 7, 27, and 47 of every hour, with the next job queued as soon as the current one finishes saving state |
 | Length of each run | `RUN_MINUTES` in the workflow | 340 minutes (~5 h 40 min) |
-| Daily heartbeat | `HEARTBEAT_HOUR` and `HEARTBEAT_MINUTE` in `restockr_core.py` | 09:00, `America/Mexico_City` |
-| Same-day reminder | `remind_on` or `expected_date` + `reminder` on the watch | Optional; date-only values fire at 07:00 Mexico City time |
+| Daily heartbeat | `HEARTBEAT_HOUR` and `HEARTBEAT_MINUTE` in `restockr_core.py` | 09:00, `America/Mexico_City` (12:00 PYT) |
+| Same-day reminder | `remind_on` or `expected_date` + `reminder` on the watch | Optional; naive times (and date-only values, which fire at 07:00) are in Paraguay time (`America/Asuncion`) unless you set `timezone` or an explicit offset |
 | How often config is reloaded | `CONFIG_RELOAD_S` in `restockr_core.py` | 300 seconds (from the repo, when `GITHUB_TOKEN` is available) |
 
 ## How runs and state work
 
-The GitHub cron does **not** check pages by itself: it only starts a job. Inside the job, the program checks every 1 to 2 minutes for about 5 h 40 min (`RUN_MINUTES` is 340; the job timeout is 355 minutes, under GitHub’s 6-hour cap). State is written to `state.json` after each check, including undelivered alerts. On success, cancel, or timeout, the workflow uploads that file (Actions cache, plus an artifact as backup) **after** the watch step. The concurrency group (`restockr-watch`) allows only one active watch job; the next job waits until the current one — including the save step — has finished, so a new run should not start until state has been stored.
+The GitHub cron does **not** check pages by itself: it only starts a job. Inside the job, the program checks every 1 to 2 minutes (every 60–75 seconds on a watch's reminder day, in Paraguay time) for about 5 h 40 min (`RUN_MINUTES` is 340; the job timeout is 355 minutes, under GitHub’s 6-hour cap). State is written to `state.json` after each check, including undelivered alerts. On success, cancel, or timeout, the workflow uploads that file (Actions cache, plus an artifact as backup) **after** the watch step. A successful or cancelled watch then queues the next run immediately. The concurrency group (`restockr-watch`) allows only one active watch job; the next job waits until the current one — including the save step — has finished, so a new run should not start until state has been stored.
 
-GitHub keeps only **one pending run** per concurrency group and cancels older queued runs. If a job is still running when several cron ticks fire, you do not get a pile of backups — only one wait in line. If that pending run is dropped or a job dies before state is saved (rare hard failure), there can be a gap until the next cron (up to about 20 minutes). The process also handles `SIGTERM` by flushing pending alerts and saving state.
+GitHub keeps only **one pending run** per concurrency group and cancels older queued runs. If a job is still running when several cron ticks fire, you do not get a pile of backups — only one wait in line. The end-of-job dispatch is meant to keep the handoff short (checkout and install of the next job, typically a few minutes). Cron remains as a backup: if a job fails early and does not dispatch the next one, or if a pending run is dropped, there can still be a gap until the next cron (up to about 20 minutes). The process also handles `SIGTERM` by flushing pending alerts and saving state.
 
 Public scheduled workflows can be **disabled after 60 days of inactivity** (no pushes or other repo activity). Visit the Actions tab or push a commit to wake them.
 

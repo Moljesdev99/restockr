@@ -51,13 +51,16 @@ def test_no_hardcoded_nov19_constant():
 
 def test_parse_remind_on_date_defaults_to_7am():
     dt = core.parse_remind_at({"remind_on": "2026-11-19"})
-    assert dt == datetime(2026, 11, 19, 7, 0, tzinfo=core.TZ)
+    assert dt == datetime(2026, 11, 19, 7, 0, tzinfo=core.DISPLAY_TZ)
+    # 07:00 PYT is 04:00 America/Mexico_City, not 07:00 Mexico City.
+    assert dt.astimezone(core.TZ) == datetime(2026, 11, 19, 4, 0, tzinfo=core.TZ)
 
 
 def test_parse_expected_date_plus_reminder():
     dt = core.parse_remind_at({"expected_date": "2026-11-19", "reminder": True})
     assert dt.date().isoformat() == "2026-11-19"
     assert dt.hour == 7
+    assert dt.tzinfo == core.DISPLAY_TZ
     assert core.parse_remind_at({"expected_date": "2026-11-19"}) is None
 
 
@@ -96,7 +99,46 @@ def test_live_config_chromatic_has_explicit_reminder():
     parsed = core.parse_config({"topic": "x", "products": raw["products"]}, require_topic=False)
     by_id = {p["id"]: p for p in parsed["products"]}
     assert by_id["chromatic"]["remind_at"] is not None
+    assert by_id["chromatic"]["remind_at"] == datetime(
+        2026, 11, 19, 7, 0, tzinfo=core.DISPLAY_TZ
+    )
     assert by_id["disney-ezra"]["remind_at"] is None
+
+
+def test_parse_remind_on_honors_timezone_field_and_offset():
+    mx = core.parse_remind_at(
+        {"remind_on": "2026-11-19 07:00", "timezone": "America/Mexico_City"}
+    )
+    assert mx == datetime(2026, 11, 19, 7, 0, tzinfo=core.TZ)
+    aware = core.parse_remind_at({"remind_on": "2026-11-19 07:00-03:00"})
+    assert aware == datetime(2026, 11, 19, 7, 0, tzinfo=core.DISPLAY_TZ)
+
+
+def test_reminder_fires_at_7am_paraguay_not_mexico(tmp_state, cfg, monkeypatch):
+    sent = []
+    monkeypatch.setattr(core, "tg_send_card", lambda *a, **k: sent.append("tg") or True)
+    monkeypatch.setattr(core, "ntfy_card", lambda *a, **k: (True, 200))
+    chromatic = {
+        "id": "chromatic",
+        "name": "Chromatic",
+        "url": "https://example.com/c",
+        "type": "restock",
+        "primary": True,
+        "remind_on": "2026-11-19 07:00",
+    }
+    chromatic["remind_at"] = core.parse_remind_at(chromatic)
+    state = core.default_state()
+    pstate = core.product_state(state, chromatic)
+    monkeypatch.setattr(
+        core, "now_mx", lambda: datetime(2026, 11, 19, 3, 59, tzinfo=core.TZ)
+    )
+    core.maybe_specials(cfg, state, chromatic, pstate, "out_of_stock")
+    assert sent == []
+    monkeypatch.setattr(
+        core, "now_mx", lambda: datetime(2026, 11, 19, 4, 0, tzinfo=core.TZ)
+    )
+    core.maybe_specials(cfg, state, chromatic, pstate, "out_of_stock")
+    assert "tg" in sent
 
 
 # --- 3. Selector scope ------------------------------------------------------
@@ -400,6 +442,49 @@ def test_existing_restock_config_still_parses():
     assert all(p["type"] == "restock" for p in parsed["products"])
 
 
+# --- Check interval on reminder days ----------------------------------------
+
+def test_check_interval_tightens_on_reminder_day_pyt():
+    products = [
+        {
+            "id": "chromatic",
+            "remind_on": "2026-11-19 07:00",
+        }
+    ]
+    products[0]["remind_at"] = core.parse_remind_at(products[0])
+    # 00:00 PYT on the reminder day (21:00 Mexico City the evening before)
+    start = datetime(2026, 11, 19, 0, 0, tzinfo=core.DISPLAY_TZ)
+    assert core.check_interval_range(now=start, products=products) == (60.0, 75.0)
+    mid = datetime(2026, 11, 19, 7, 0, tzinfo=core.DISPLAY_TZ)
+    assert core.check_interval_range(now=mid, products=products) == (60.0, 75.0)
+    late = datetime(2026, 11, 19, 23, 59, tzinfo=core.DISPLAY_TZ)
+    assert core.check_interval_range(now=late, products=products) == (60.0, 75.0)
+    # The day before and after stay at the normal 60-120s interval
+    before = datetime(2026, 11, 18, 23, 59, tzinfo=core.DISPLAY_TZ)
+    assert core.check_interval_range(now=before, products=products) == (60.0, 120.0)
+    after = datetime(2026, 11, 20, 0, 0, tzinfo=core.DISPLAY_TZ)
+    assert core.check_interval_range(now=after, products=products) == (60.0, 120.0)
+    # Heartbeat time (09:00 Mexico City / 12:00 PYT) is unchanged on a normal day
+    hb = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)
+    assert core.check_interval_range(now=hb, products=products) == (60.0, 120.0)
+    assert (core.HEARTBEAT_HOUR, core.HEARTBEAT_MINUTE) == (9, 0)
+    assert core.TZ.key == "America/Mexico_City"
+
+
+def test_check_interval_not_faster_than_60s():
+    products = [{"id": "chromatic", "remind_on": "2026-11-19 07:00"}]
+    products[0]["remind_at"] = core.parse_remind_at(products[0])
+    now = datetime(2026, 11, 19, 7, 0, tzinfo=core.DISPLAY_TZ)
+    low, high = core.check_interval_range(now=now, products=products)
+    assert low >= 60
+    assert high >= low
+    low2, high2 = core.check_interval_range(
+        now=now, products=products, in_stock_repeat=True
+    )
+    assert low2 >= 60
+    assert (low2, high2) == (float(core.IN_STOCK_REPEAT_S), float(core.IN_STOCK_REPEAT_S))
+
+
 # --- Daily heartbeat --------------------------------------------------------
 
 def _heartbeat_cfg():
@@ -459,7 +544,7 @@ def test_build_heartbeat_text_lists_watches_and_reminder():
         '🎮 <b>Chromatic Codex</b> — ⏳ Not in stock yet · expected November 19 · US$200.00 · <a href="https://openai.com/supply/co-lab/chromatic/">View</a>\n'
         '⚔️ <b>Ezra Legacy Lightsaber Set</b> — ⏳ Not in stock yet · expected November 17 · US$400.00 · <a href="https://www.disneystore.com/ezra-example">View</a>\n'
         "\n"
-        "⏰ Reminder: Chromatic Codex — Nov 19, 10:00 PYT\n"
+        "⏰ Reminder: Chromatic Codex — Nov 19, 07:00 PYT\n"
         "\n"
         "I'll ping you the moment something changes."
     )

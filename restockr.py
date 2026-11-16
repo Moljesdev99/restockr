@@ -440,6 +440,7 @@ def main() -> int:
             core.sleep_jitter(
                 extra=extra,
                 in_stock_repeat=core.any_in_stock_repeat(state, products, results),
+                products=products,
             )
             if time.monotonic() >= deadline or core._stop:
                 break

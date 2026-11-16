@@ -43,6 +43,7 @@ DELIVERY_BACKOFF_CAP_S = 300
 DELIVERY_MAX_ATTEMPTS = 12
 
 CHECK_MIN_S, CHECK_MAX_S = 60, 120
+TIGHT_CHECK_MIN_S, TIGHT_CHECK_MAX_S = 60, 75
 IN_STOCK_REPEAT_S = 120
 IN_STOCK_ALERT_MAX = 10
 NAV_TIMEOUT_MS = 45_000
@@ -168,6 +169,7 @@ def _param(entry: dict, *keys, default=None):
         "id", "name", "short_name", "url", "emoji", "is_test", "primary",
         "type", "params", "parameters", "image", "image_url", "cooldown",
         "button_text", "remind_on", "expected_date", "reminder", "remind_at",
+        "timezone", "tz",
     }
     for k in keys:
         if isinstance(params, dict) and k in params and params[k] is not None:
@@ -177,10 +179,24 @@ def _param(entry: dict, *keys, default=None):
     return default
 
 
+def _remind_timezone(entry: dict) -> ZoneInfo:
+    raw = entry.get("timezone") or entry.get("tz")
+    if raw is None or str(raw).strip() == "":
+        return DISPLAY_TZ
+    name = str(raw).strip()
+    try:
+        return ZoneInfo(name)
+    except Exception as exc:
+        raise ValueError(f"Invalid timezone: {name!r}") from exc
+
+
 def parse_remind_at(entry: dict) -> datetime | None:
     """Optional per-watch reminder. Supports remind_on, or expected_date + reminder=true.
 
-    Date-only values fire at 07:00 America/Mexico_City. No reminder unless configured.
+    Naive wall-clock times are interpreted in America/Asuncion (PYT), or in
+    the watch's optional `timezone` field. Date-only values fire at 07:00 in
+    that zone. An explicit UTC offset or trailing Z is honored as-is.
+    The daily heartbeat schedule is separate and still uses America/Mexico_City.
     """
     raw = entry.get("remind_on")
     if not raw and entry.get("reminder") and entry.get("expected_date"):
@@ -190,19 +206,65 @@ def parse_remind_at(entry: dict) -> datetime | None:
     text = str(raw).strip()
     if not text:
         return None
-    text = text.replace("T", " ").replace("Z", "")
-    # drop a trailing timezone offset for simple parsing; we always use TZ
-    text = re.sub(r"([ap]m)$", "", text, flags=re.I)
-    text = re.sub(r"\s*[+-]\d{2}:?\d{2}$", "", text).strip()
+    tz = _remind_timezone(entry)
+    normalized = text.replace("T", " ").strip()
+    iso = normalized[:-1] + "+00:00" if normalized.endswith(("Z", "z")) else normalized
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        dt = None
+    if dt is not None:
+        if dt.tzinfo is not None:
+            return dt
+        if len(normalized.split()) == 1 and ":" not in normalized:
+            dt = dt.replace(hour=7, minute=0, second=0)
+        return dt.replace(tzinfo=tz)
+    parsed = re.sub(r"([ap]m)$", "", normalized, flags=re.I)
+    parsed = re.sub(r"\s*[+-]\d{2}:?\d{2}$", "", parsed).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(text, fmt)
+            dt = datetime.strptime(parsed, fmt)
             if fmt == "%Y-%m-%d":
                 dt = dt.replace(hour=7, minute=0, second=0)
-            return dt.replace(tzinfo=TZ)
+            return dt.replace(tzinfo=tz)
         except ValueError:
             continue
     raise ValueError(f"Invalid remind_on/expected_date: {raw!r}")
+
+
+def reminder_local_dates(products) -> set:
+    """Calendar dates in America/Asuncion that have a configured reminder."""
+    dates = set()
+    for product in products or []:
+        value = product.get("remind_at")
+        if not isinstance(value, datetime):
+            try:
+                value = parse_remind_at(product)
+            except ValueError:
+                value = None
+        if not value:
+            continue
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=DISPLAY_TZ)
+        dates.add(value.astimezone(DISPLAY_TZ).date())
+    return dates
+
+
+def check_interval_range(
+    now=None,
+    products=None,
+    in_stock_repeat: bool = False,
+) -> tuple[float, float]:
+    """Seconds between checks. Tightens to 60-75s on a reminder day (PYT)."""
+    if in_stock_repeat:
+        return float(IN_STOCK_REPEAT_S), float(IN_STOCK_REPEAT_S)
+    now = now or datetime.now(DISPLAY_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TZ)
+    local_date = now.astimezone(DISPLAY_TZ).date()
+    if products and local_date in reminder_local_dates(products):
+        return float(TIGHT_CHECK_MIN_S), float(TIGHT_CHECK_MAX_S)
+    return float(CHECK_MIN_S), float(CHECK_MAX_S)
 
 
 def watch_fingerprint(entry: dict) -> str:
@@ -2543,11 +2605,16 @@ def handle_failure(cfg: dict, state: dict, product: dict, err: str) -> float:
     return 0.0
 
 
-def sleep_jitter(extra: float = 0.0, in_stock_repeat: bool = False) -> None:
-    if in_stock_repeat:
-        base = IN_STOCK_REPEAT_S
-    else:
-        base = random.uniform(CHECK_MIN_S, CHECK_MAX_S)
+def sleep_jitter(
+    extra: float = 0.0,
+    in_stock_repeat: bool = False,
+    products=None,
+    now=None,
+) -> None:
+    low, high = check_interval_range(
+        now=now, products=products, in_stock_repeat=in_stock_repeat
+    )
+    base = low if low == high else random.uniform(low, high)
     total = base + extra
     log.info("sleeping %.1fs", total)
     end = time.monotonic() + total
@@ -2632,6 +2699,7 @@ def main() -> int:
             sleep_jitter(
                 extra=extra,
                 in_stock_repeat=any_in_stock_repeat(state, products, last_results),
+                products=products,
             )
         log.info("Stopped cleanly")
         return 0
