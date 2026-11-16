@@ -36,6 +36,7 @@ DISPLAY_TZ = ZoneInfo("America/Asuncion")
 DISPLAY_TZ_LABEL = "PYT"
 PRODUCT_URL = "https://openai.com/supply/co-lab/chromatic/"
 HEARTBEAT_HOUR, HEARTBEAT_MINUTE = 9, 0
+TELEGRAM_TEXT_MAX = 4096
 CONFIG_RELOAD_S = 300
 # Set True in test mode so regular alerts are not enqueued and live state is not used.
 TEST_MODE = False
@@ -2221,6 +2222,39 @@ def build_heartbeat_keyboard(
     return {"inline_keyboard": rows}
 
 
+def _heartbeat_product_lines(product: dict, pstate: dict | None = None) -> list[str]:
+    """One heartbeat block for a watch, starting with a blank line."""
+    pstate = pstate or {}
+    emoji = product.get("emoji") or "•"
+    name = heartbeat_display_name(product)
+    status = heartbeat_watch_status(product, pstate)
+    lines = [
+        "",
+        f"{emoji} <b>{htmlmod.escape(name)}</b>",
+        f"📦 <b>Status:</b> {htmlmod.escape(status)}",
+    ]
+    if is_restock(product):
+        expected = format_date(
+            pstate.get("last_expected_restock") or product.get("expected_date")
+        )
+        if expected:
+            lines.append(f"📅 <b>Expected date:</b> {htmlmod.escape(expected)}")
+    price = pstate.get("product_price")
+    if price:
+        lines.append(f"💵 <b>Price:</b> {htmlmod.escape(str(price))}")
+    return lines
+
+
+def _render_heartbeat(header: list[str], blocks: list[list[str]], omitted: int) -> str:
+    lines = list(header)
+    for block in blocks:
+        lines.extend(block)
+    if omitted:
+        lines += ["", f"+{omitted} more"]
+    lines += ["", "I'll ping you the moment something changes."]
+    return "\n".join(lines)
+
+
 def build_heartbeat_text(
     cfg: dict | None,
     state: dict | None,
@@ -2231,47 +2265,34 @@ def build_heartbeat_text(
     """Daily heartbeat in HTML (Telegram parse_mode=HTML). Uses saved state only.
 
     Product links are sent as inline keyboard buttons, not as in-text View links.
+    The same-day reminder is sent separately and is not listed here. If the
+    message would exceed Telegram's text limit, trailing watches are omitted
+    and replaced with '+N more'.
     """
     now = now or now_mx()
     state = state or {}
     products = _heartbeat_products(cfg, fallback_product)
     n = len(products)
     watch_word = "watch" if n == 1 else "watches"
-    lines = [
+    header = [
         "🟢 <b>Restockr is running</b>",
         f"🕐 Last check: {format_display_time(now)} · {n} {watch_word} active",
     ]
-    reminders: list[str] = []
     bucket = state.get("products") or {}
-    for product in products:
-        pstate = bucket.get(product.get("id") or "") or {}
-        emoji = product.get("emoji") or "•"
-        name = heartbeat_display_name(product)
-        status = heartbeat_watch_status(product, pstate)
-        lines.append("")
-        lines.append(f"{emoji} <b>{htmlmod.escape(name)}</b>")
-        lines.append(f"📦 <b>Status:</b> {htmlmod.escape(status)}")
-        if is_restock(product):
-            expected = format_date(
-                pstate.get("last_expected_restock") or product.get("expected_date")
-            )
-            if expected:
-                lines.append(f"📅 <b>Expected date:</b> {htmlmod.escape(expected)}")
-        price = pstate.get("product_price")
-        if price:
-            lines.append(f"💵 <b>Price:</b> {htmlmod.escape(str(price))}")
-
-        remind_at = _heartbeat_remind_at(product)
-        if remind_at and remind_at.date() >= now.date():
-            if pstate.get("reminder_sent_on") != remind_at.date().isoformat():
-                reminders.append(
-                    f"⏰ Reminder: {htmlmod.escape(name)} — {format_display_time(remind_at, with_date=True)}"
-                )
-    if reminders:
-        lines.append("")
-        lines.extend(reminders)
-    lines += ["", "I'll ping you the moment something changes."]
-    return "\n".join(lines)
+    blocks = [
+        _heartbeat_product_lines(product, bucket.get(product.get("id") or "") or {})
+        for product in products
+    ]
+    visible = list(blocks)
+    omitted = 0
+    text = _render_heartbeat(header, visible, omitted)
+    while len(text) > TELEGRAM_TEXT_MAX and visible:
+        visible.pop()
+        omitted += 1
+        text = _render_heartbeat(header, visible, omitted)
+    if len(text) > TELEGRAM_TEXT_MAX:
+        text = text[: TELEGRAM_TEXT_MAX - 1].rstrip() + "…"
+    return text
 
 
 def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: str) -> None:

@@ -538,7 +538,7 @@ def _heartbeat_state():
     return state
 
 
-def test_build_heartbeat_text_lists_watches_and_reminder():
+def test_build_heartbeat_text_lists_watches():
     now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)  # 12:00 PYT
     cfg = _heartbeat_cfg()
     text = core.build_heartbeat_text(cfg, _heartbeat_state(), now=now)
@@ -556,10 +556,9 @@ def test_build_heartbeat_text_lists_watches_and_reminder():
         "📅 <b>Expected date:</b> November 17\n"
         "💵 <b>Price:</b> US$400.00\n"
         "\n"
-        "⏰ Reminder: Chromatic Codex — Nov 19, 07:00 PYT\n"
-        "\n"
         "I'll ping you the moment something changes."
     )
+    assert "⏰ Reminder" not in text
     assert "TEST" not in text
     assert "the Chromatic" not in text
     assert "View" not in text
@@ -573,6 +572,102 @@ def test_build_heartbeat_text_lists_watches_and_reminder():
             ]
         ]
     }
+
+
+def test_build_heartbeat_scales_to_many_watches():
+    emojis = ["🎮", "⚔️", "🎧", "👟", "📱", "🎟️", "📦", "🧪"]
+    products = []
+    state_products = {}
+    for i, emoji in enumerate(emojis, start=1):
+        pid = f"watch-{i}"
+        is_restock = i % 2 == 1
+        products.append(
+            {
+                "id": pid,
+                "name": f"Product {i} Long Name",
+                "short_name": f"Item{i}",
+                "url": f"https://example.com/p{i}",
+                "emoji": emoji,
+                "type": "restock" if is_restock else "text_appears",
+                "text": None if is_restock else "Buy now",
+                "primary": i == 1,
+                "expected_date": "2026-12-01" if is_restock else None,
+                "remind_on": "2026-12-01 07:00" if i == 1 else None,
+            }
+        )
+        state_products[pid] = {
+            **core.default_product_state(),
+            "last_status": "out_of_stock" if is_restock else "idle",
+            "last_expected_restock": "December 1" if is_restock else None,
+            "product_price": f"US${100 + i}.00" if is_restock else None,
+        }
+    cfg = core.parse_config({"products": products})
+    state = core.default_state()
+    state["products"] = state_products
+    now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)
+    text = core.build_heartbeat_text(cfg, state, now=now)
+    assert "8 watches active" in text
+    for i, emoji in enumerate(emojis, start=1):
+        assert f"{emoji} <b>Item{i}</b>" in text
+    assert "⏰ Reminder" not in text
+    assert "TEST" not in text
+    assert len(text) <= core.TELEGRAM_TEXT_MAX
+    assert text.endswith("I'll ping you the moment something changes.")
+    rows = core.build_heartbeat_keyboard(cfg)["inline_keyboard"]
+    assert [len(row) for row in rows] == [2, 2, 2, 2]
+    assert all(len(row) <= 2 for row in rows)
+    buttons = [btn for row in rows for btn in row]
+    assert len(buttons) == 8
+    assert buttons[0]["text"] == "🎮 Open Item1"
+    assert buttons[1]["text"] == "⚔️ Open Item2"
+    assert buttons[-1]["text"] == "🧪 Open Item8"
+    assert buttons[0]["url"] == "https://example.com/p1"
+
+
+def test_build_heartbeat_text_truncates_to_telegram_limit():
+    long_name = "Very Long Product Name " * 20
+    long_price = "US$" + ("9" * 200)
+    products = []
+    state_products = {}
+    for i in range(1, 21):
+        pid = f"long-{i}"
+        products.append(
+            {
+                "id": pid,
+                "name": f"{long_name} {i}",
+                "short_name": f"{long_name} {i}",
+                "url": f"https://example.com/long{i}",
+                "emoji": "📦",
+                "type": "restock",
+                "primary": i == 1,
+                "expected_date": "2026-12-01",
+                "remind_on": "2026-12-01 07:00",
+            }
+        )
+        state_products[pid] = {
+            **core.default_product_state(),
+            "last_status": "out_of_stock",
+            "last_expected_restock": "December 1",
+            "product_price": long_price,
+        }
+    cfg = core.parse_config({"products": products})
+    state = core.default_state()
+    state["products"] = state_products
+    now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)
+    text = core.build_heartbeat_text(cfg, state, now=now)
+    assert "20 watches active" in text
+    assert "⏰ Reminder" not in text
+    assert "I'll ping you the moment something changes." in text
+    assert len(text) <= core.TELEGRAM_TEXT_MAX == 4096
+    match = __import__("re").search(r"\+(\d+) more", text)
+    assert match, text[-200:]
+    omitted = int(match.group(1))
+    assert 1 <= omitted < 20
+    # Shown watches plus '+N more' should account for every watch.
+    shown = text.count("📦 <b>Status:</b>")
+    assert shown + omitted == 20
+    rows = core.build_heartbeat_keyboard(cfg)["inline_keyboard"]
+    assert [len(row) for row in rows] == [2] * 10
 
 
 def test_build_heartbeat_generic_watch_and_singular():
