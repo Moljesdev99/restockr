@@ -32,6 +32,8 @@ PROFILE_DIR = DIR / "chrome-profile"
 LOG_PATH = DIR / "watch.log"
 
 TZ = ZoneInfo("America/Mexico_City")
+DISPLAY_TZ = ZoneInfo("America/Asuncion")
+DISPLAY_TZ_LABEL = "PYT"
 PRODUCT_URL = "https://openai.com/supply/co-lab/chromatic/"
 HEARTBEAT_HOUR, HEARTBEAT_MINUTE = 9, 0
 CONFIG_RELOAD_S = 300
@@ -1965,12 +1967,11 @@ def _send_event_channel(cfg: dict, channel: str, event: dict, product: dict) -> 
                 tags=event.get("tags"),
             )
             return bool(ok)
-        title = event.get("title") or event.get("event_line") or "Restockr"
-        title = re.sub(r"</?b>", "", title)
+        title = html_to_plain(event.get("title") or event.get("event_line") or "Restockr")
         ok, _status = ntfy(
             cfg,
             title=title,
-            message=event.get("text") or title,
+            message=html_to_plain(event.get("text") or title),
             priority=int(event.get("priority") or 3),
             tags=event.get("tags"),
         )
@@ -2039,6 +2040,131 @@ def emit_alert(cfg, state, product, **kwargs) -> dict | None:
 
 
 
+
+def html_to_plain(text: str | None) -> str:
+    """Strip a small subset of HTML so ntfy gets readable plain text."""
+    if not text:
+        return ""
+    out = re.sub(r'<a\s+href=["\']([^"\']+)["\'][^>]*>.*?</a>', r"\1", text, flags=re.I | re.S)
+    out = re.sub(r"<br\s*/?>", "\n", out, flags=re.I)
+    out = re.sub(r"</?b>", "", out, flags=re.I)
+    out = re.sub(r"<[^>]+>", "", out)
+    return htmlmod.unescape(out).strip()
+
+
+def format_display_time(dt: datetime, *, with_date: bool = False) -> str:
+    """Format a timestamp in America/Asuncion, always labeled PYT."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    local = dt.astimezone(DISPLAY_TZ)
+    clock = local.strftime("%H:%M")
+    if with_date:
+        return f"{local.strftime('%b')} {local.day}, {clock} {DISPLAY_TZ_LABEL}"
+    return f"{clock} {DISPLAY_TZ_LABEL}"
+
+
+def heartbeat_display_name(product: dict | None) -> str:
+    product = product or {}
+    raw = product.get("short_name") or product.get("name") or product.get("id") or "Watch"
+    name = re.sub(r"^(the|la|el|los|las)\s+", "", str(raw).strip(), flags=re.I).strip()
+    return name or str(product.get("name") or product.get("id") or "Watch")
+
+
+def heartbeat_watch_status(product: dict | None, pstate: dict | None = None) -> str:
+    """Compact status line for the daily heartbeat."""
+    product = product or {}
+    pstate = pstate or {}
+    status = pstate.get("last_status")
+    if is_restock(product):
+        if status == "in_stock":
+            return "🟢 In stock"
+        if status == "queue":
+            return "🚦 Waiting room is open"
+        if status == "out_of_stock":
+            return "⏳ Not in stock yet"
+        return "👀 Watching"
+    if status == "triggered":
+        return "🟢 Condition met"
+    if status == "changed":
+        return "🔔 Content changed"
+    return "👀 Watching"
+
+
+def _heartbeat_remind_at(product: dict) -> datetime | None:
+    value = product.get("remind_at")
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=TZ) if value.tzinfo is None else value
+    if isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value)
+            return dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt
+        except ValueError:
+            pass
+    try:
+        return parse_remind_at(product)
+    except ValueError:
+        return None
+
+
+def _html_link(url: str, label: str = "View") -> str:
+    return f'<a href="{htmlmod.escape(url, quote=True)}">{htmlmod.escape(label)}</a>'
+
+
+def build_heartbeat_text(
+    cfg: dict | None,
+    state: dict | None,
+    *,
+    now: datetime | None = None,
+    fallback_product: dict | None = None,
+) -> str:
+    """Daily heartbeat in HTML (Telegram parse_mode=HTML). Uses saved state only."""
+    now = now or now_mx()
+    state = state or {}
+    products = list((cfg or {}).get("products") or [])
+    if not products and fallback_product:
+        products = [fallback_product]
+    n = len(products)
+    watch_word = "watch" if n == 1 else "watches"
+    lines = [
+        "🟢 <b>Restockr is running</b>",
+        f"🕐 Last check: {format_display_time(now)} · {n} {watch_word} active",
+        "",
+    ]
+    reminders: list[str] = []
+    bucket = state.get("products") or {}
+    for product in products:
+        pstate = bucket.get(product.get("id") or "") or {}
+        emoji = product.get("emoji") or "•"
+        name = heartbeat_display_name(product)
+        status = heartbeat_watch_status(product, pstate)
+        extras: list[str] = []
+        expected = format_date(pstate.get("last_expected_restock") or product.get("expected_date"))
+        if expected:
+            extras.append(f"expected {htmlmod.escape(expected)}")
+        price = pstate.get("product_price")
+        if price:
+            extras.append(htmlmod.escape(str(price)))
+        url = product.get("url")
+        if url:
+            extras.append(_html_link(str(url)))
+        line = f"{emoji} <b>{htmlmod.escape(name)}</b> — {status}"
+        if extras:
+            line += " · " + " · ".join(extras)
+        lines.append(line)
+
+        remind_at = _heartbeat_remind_at(product)
+        if remind_at and remind_at.date() >= now.date():
+            if pstate.get("reminder_sent_on") != remind_at.date().isoformat():
+                reminders.append(
+                    f"⏰ Reminder: {htmlmod.escape(name)} — {format_display_time(remind_at, with_date=True)}"
+                )
+    if reminders:
+        lines.append("")
+        lines.extend(reminders)
+    lines += ["", "I'll ping you the moment something changes."]
+    return "\n".join(lines)
+
+
 def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: str) -> None:
     n = now_mx()
     remind_at = product.get("remind_at")
@@ -2081,15 +2207,16 @@ def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: 
         and today not in state.get("heartbeat_dates", [])
         and status != "in_stock"
     ):
+        text = build_heartbeat_text(cfg, state, now=n, fallback_product=product)
         emit_alert(
             cfg,
             state,
             product,
             kind="heartbeat",
             use_card=False,
-            title="☁️ Cloud watcher is active",
-            text="Cloud watcher is active, no stock yet.",
-            event_line="☁️ Cloud watcher is active, no stock yet.",
+            title="🟢 Restockr is running",
+            text=text,
+            event_line="🟢 Restockr is running",
             priority=3,
             tags=["green_heart"],
         )

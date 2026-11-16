@@ -398,3 +398,139 @@ def test_existing_restock_config_still_parses():
     ids = [p["id"] for p in parsed["products"]]
     assert ids == ["chromatic", "disney-ezra"]
     assert all(p["type"] == "restock" for p in parsed["products"])
+
+
+# --- Daily heartbeat --------------------------------------------------------
+
+def _heartbeat_cfg():
+    return core.parse_config(
+        {
+            "products": [
+                {
+                    "id": "chromatic",
+                    "name": "Game Boy Chromatic Codex",
+                    "short_name": "the Chromatic Codex",
+                    "url": "https://openai.com/supply/co-lab/chromatic/",
+                    "emoji": "🎮",
+                    "type": "restock",
+                    "primary": True,
+                    "remind_on": "2026-11-19 07:00",
+                },
+                {
+                    "id": "disney-ezra",
+                    "name": "Ezra Legacy Lightsaber Set",
+                    "short_name": "the Ezra Legacy Lightsaber Set",
+                    "url": "https://www.disneystore.com/ezra-example",
+                    "emoji": "⚔️",
+                    "type": "restock",
+                    "primary": False,
+                },
+            ]
+        }
+    )
+
+
+def _heartbeat_state():
+    state = core.default_state()
+    state["products"] = {
+        "chromatic": {
+            **core.default_product_state(),
+            "last_status": "out_of_stock",
+            "last_expected_restock": "November 19",
+            "product_price": "US$200.00",
+        },
+        "disney-ezra": {
+            **core.default_product_state(),
+            "last_status": "out_of_stock",
+            "last_expected_restock": "November 17",
+            "product_price": "US$400.00",
+        },
+    }
+    return state
+
+
+def test_build_heartbeat_text_lists_watches_and_reminder():
+    now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)  # 12:00 PYT
+    text = core.build_heartbeat_text(_heartbeat_cfg(), _heartbeat_state(), now=now)
+    assert text == (
+        "🟢 <b>Restockr is running</b>\n"
+        "🕐 Last check: 12:00 PYT · 2 watches active\n"
+        "\n"
+        '🎮 <b>Chromatic Codex</b> — ⏳ Not in stock yet · expected November 19 · US$200.00 · <a href="https://openai.com/supply/co-lab/chromatic/">View</a>\n'
+        '⚔️ <b>Ezra Legacy Lightsaber Set</b> — ⏳ Not in stock yet · expected November 17 · US$400.00 · <a href="https://www.disneystore.com/ezra-example">View</a>\n'
+        "\n"
+        "⏰ Reminder: Chromatic Codex — Nov 19, 10:00 PYT\n"
+        "\n"
+        "I'll ping you the moment something changes."
+    )
+    assert "TEST" not in text
+    assert "the Chromatic" not in text
+
+
+def test_build_heartbeat_generic_watch_and_singular():
+    cfg = core.parse_config(
+        {
+            "products": [
+                {
+                    "id": "tickets",
+                    "name": "Movie tickets",
+                    "url": "https://example.com/tickets",
+                    "emoji": "🎟️",
+                    "type": "text_appears",
+                    "text": "Buy tickets",
+                    "primary": True,
+                }
+            ]
+        }
+    )
+    state = core.default_state()
+    state["products"] = {
+        "tickets": {**core.default_product_state(), "last_status": "idle"},
+    }
+    now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)
+    text = core.build_heartbeat_text(cfg, state, now=now)
+    assert "1 watch active" in text
+    assert "🎟️ <b>Movie tickets</b> — 👀 Watching" in text
+    assert "I'll ping you the moment something changes." in text
+
+
+def test_html_to_plain_strips_markup_and_keeps_link_target():
+    html = '🟢 <b>Restockr is running</b> · <a href="https://example.com/p">View</a>'
+    plain = core.html_to_plain(html)
+    assert plain == "🟢 Restockr is running · https://example.com/p"
+    assert "<" not in plain
+
+
+def test_maybe_specials_sends_rich_heartbeat_once(tmp_state, monkeypatch):
+    sent = []
+    monkeypatch.setattr(core, "tg_send", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(core, "now_mx", lambda: datetime(2026, 11, 16, 10, 0, tzinfo=core.TZ))
+    cfg = _heartbeat_cfg()
+    cfg["topic"] = "restockr-no-topic"
+    cfg["_ntfy_enabled"] = False
+    state = _heartbeat_state()
+    products = cfg["products"]
+    chromatic = next(p for p in products if p["id"] == "chromatic")
+    core.maybe_specials(cfg, state, chromatic, core.product_state(state, chromatic), "out_of_stock")
+    assert len(sent) == 1
+    assert sent[0].startswith("🟢 <b>Restockr is running</b>")
+    assert "13:00 PYT" in sent[0]  # 10:00 Mexico City
+    assert "2 watches active" in sent[0]
+    assert "2026-11-16" in state["heartbeat_dates"]
+    sent.clear()
+    core.maybe_specials(cfg, state, chromatic, core.product_state(state, chromatic), "out_of_stock")
+    assert sent == []
+
+
+def test_heartbeat_skipped_when_primary_is_in_stock(tmp_state, monkeypatch):
+    sent = []
+    monkeypatch.setattr(core, "tg_send", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(core, "now_mx", lambda: datetime(2026, 11, 16, 10, 0, tzinfo=core.TZ))
+    cfg = _heartbeat_cfg()
+    cfg["topic"] = "restockr-no-topic"
+    cfg["_ntfy_enabled"] = False
+    state = _heartbeat_state()
+    chromatic = next(p for p in cfg["products"] if p["id"] == "chromatic")
+    core.maybe_specials(cfg, state, chromatic, core.product_state(state, chromatic), "in_stock")
+    assert sent == []
+    assert state.get("heartbeat_dates") == []
