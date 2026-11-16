@@ -520,17 +520,21 @@ def _tg_post(method: str, fields: dict, file_field: tuple[str, str, bytes] | Non
         return json.loads(resp.read().decode())
 
 
-def tg_send(text: str) -> bool:
+def tg_send(text: str, reply_markup: dict | str | None = None) -> bool:
     """Plain Telegram text message (heartbeat, blocked, recovered)."""
     try:
-        data = _tg_post(
-            "sendMessage",
-            {
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": "true",
-            },
-        )
+        payload = {
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+        if reply_markup:
+            payload["reply_markup"] = (
+                reply_markup
+                if isinstance(reply_markup, str)
+                else json.dumps(reply_markup, ensure_ascii=False)
+            )
+        data = _tg_post("sendMessage", payload)
         ok = bool(data.get("ok"))
         if ok:
             log.info("telegram sent (text)")
@@ -1931,6 +1935,7 @@ def enqueue_alert(
     title: str | None = None,
     use_card: bool = True,
     coalesce: bool = True,
+    reply_markup: dict | str | None = None,
 ) -> dict | None:
     """Queue an alert. Not marked delivered until each channel succeeds.
 
@@ -1974,6 +1979,7 @@ def enqueue_alert(
         "text": text,
         "title": title,
         "use_card": use_card,
+        "reply_markup": reply_markup,
         "created_ts": now_mx().isoformat(),
         "channels": {
             "telegram": {"status": "pending", "attempts": 0, "last_attempt_ts": None},
@@ -1988,7 +1994,7 @@ def enqueue_alert(
     if coalesce:
         for existing in pending:
             if existing.get("watch_id") == event["watch_id"] and existing.get("kind") == kind:
-                for key in ("event_line", "info", "pstate", "product", "text", "title", "priority", "tags", "use_card", "is_test"):
+                for key in ("event_line", "info", "pstate", "product", "text", "title", "priority", "tags", "use_card", "is_test", "reply_markup"):
                     existing[key] = event[key]
                 existing["updated_ts"] = event["created_ts"]
                 log.info("Coalesced pending event watch=%s kind=%s", event["watch_id"], kind)
@@ -2013,7 +2019,12 @@ def _send_event_channel(cfg: dict, channel: str, event: dict, product: dict) -> 
                     event_line=event.get("event_line"),
                 )
             )
-        return bool(tg_send(event.get("text") or event.get("event_line") or ""))
+        return bool(
+            tg_send(
+                event.get("text") or event.get("event_line") or "",
+                reply_markup=event.get("reply_markup"),
+            )
+        )
     if channel == "ntfy":
         if not _ntfy_on(cfg):
             return True
@@ -2168,8 +2179,46 @@ def _heartbeat_remind_at(product: dict) -> datetime | None:
         return None
 
 
-def _html_link(url: str, label: str = "View") -> str:
-    return f'<a href="{htmlmod.escape(url, quote=True)}">{htmlmod.escape(label)}</a>'
+def heartbeat_button_label(product: dict | None) -> str:
+    """Short inline-keyboard label, e.g. '🎮 Open Chromatic'."""
+    product = product or {}
+    emoji = product.get("emoji") or "🔗"
+    name = heartbeat_display_name(product)
+    words = name.split()
+    short = words[0] if words else "page"
+    return f"{emoji} Open {short}"
+
+
+def _heartbeat_products(
+    cfg: dict | None,
+    fallback_product: dict | None = None,
+) -> list[dict]:
+    products = list((cfg or {}).get("products") or [])
+    if not products and fallback_product:
+        products = [fallback_product]
+    return products
+
+
+def build_heartbeat_keyboard(
+    cfg: dict | None,
+    fallback_product: dict | None = None,
+) -> dict | None:
+    """Inline URL buttons, up to two per row, one per watched page."""
+    rows: list[list[dict]] = []
+    row: list[dict] = []
+    for product in _heartbeat_products(cfg, fallback_product):
+        url = product.get("url")
+        if not url:
+            continue
+        row.append({"text": heartbeat_button_label(product), "url": str(url)})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    if not rows:
+        return None
+    return {"inline_keyboard": rows}
 
 
 def build_heartbeat_text(
@@ -2179,18 +2228,18 @@ def build_heartbeat_text(
     now: datetime | None = None,
     fallback_product: dict | None = None,
 ) -> str:
-    """Daily heartbeat in HTML (Telegram parse_mode=HTML). Uses saved state only."""
+    """Daily heartbeat in HTML (Telegram parse_mode=HTML). Uses saved state only.
+
+    Product links are sent as inline keyboard buttons, not as in-text View links.
+    """
     now = now or now_mx()
     state = state or {}
-    products = list((cfg or {}).get("products") or [])
-    if not products and fallback_product:
-        products = [fallback_product]
+    products = _heartbeat_products(cfg, fallback_product)
     n = len(products)
     watch_word = "watch" if n == 1 else "watches"
     lines = [
         "🟢 <b>Restockr is running</b>",
         f"🕐 Last check: {format_display_time(now)} · {n} {watch_word} active",
-        "",
     ]
     reminders: list[str] = []
     bucket = state.get("products") or {}
@@ -2199,20 +2248,18 @@ def build_heartbeat_text(
         emoji = product.get("emoji") or "•"
         name = heartbeat_display_name(product)
         status = heartbeat_watch_status(product, pstate)
-        extras: list[str] = []
-        expected = format_date(pstate.get("last_expected_restock") or product.get("expected_date"))
-        if expected:
-            extras.append(f"expected {htmlmod.escape(expected)}")
+        lines.append("")
+        lines.append(f"{emoji} <b>{htmlmod.escape(name)}</b>")
+        lines.append(f"📦 <b>Status:</b> {htmlmod.escape(status)}")
+        if is_restock(product):
+            expected = format_date(
+                pstate.get("last_expected_restock") or product.get("expected_date")
+            )
+            if expected:
+                lines.append(f"📅 <b>Expected date:</b> {htmlmod.escape(expected)}")
         price = pstate.get("product_price")
         if price:
-            extras.append(htmlmod.escape(str(price)))
-        url = product.get("url")
-        if url:
-            extras.append(_html_link(str(url)))
-        line = f"{emoji} <b>{htmlmod.escape(name)}</b> — {status}"
-        if extras:
-            line += " · " + " · ".join(extras)
-        lines.append(line)
+            lines.append(f"💵 <b>Price:</b> {htmlmod.escape(str(price))}")
 
         remind_at = _heartbeat_remind_at(product)
         if remind_at and remind_at.date() >= now.date():
@@ -2279,6 +2326,7 @@ def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: 
             title="🟢 Restockr is running",
             text=text,
             event_line="🟢 Restockr is running",
+            reply_markup=build_heartbeat_keyboard(cfg, fallback_product=product),
             priority=3,
             tags=["green_heart"],
         )

@@ -99,8 +99,12 @@ def test_live_config_chromatic_has_explicit_reminder():
     parsed = core.parse_config({"topic": "x", "products": raw["products"]}, require_topic=False)
     by_id = {p["id"]: p for p in parsed["products"]}
     assert by_id["chromatic"]["remind_at"] is not None
+    assert raw["products"][0].get("timezone") == "America/Mexico_City"
     assert by_id["chromatic"]["remind_at"] == datetime(
-        2026, 11, 19, 7, 0, tzinfo=core.DISPLAY_TZ
+        2026, 11, 19, 6, 0, tzinfo=core.TZ
+    )
+    assert by_id["chromatic"]["remind_at"].astimezone(core.DISPLAY_TZ) == datetime(
+        2026, 11, 19, 9, 0, tzinfo=core.DISPLAY_TZ
     )
     assert by_id["disney-ezra"]["remind_at"] is None
 
@@ -536,13 +540,21 @@ def _heartbeat_state():
 
 def test_build_heartbeat_text_lists_watches_and_reminder():
     now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)  # 12:00 PYT
-    text = core.build_heartbeat_text(_heartbeat_cfg(), _heartbeat_state(), now=now)
+    cfg = _heartbeat_cfg()
+    text = core.build_heartbeat_text(cfg, _heartbeat_state(), now=now)
     assert text == (
         "🟢 <b>Restockr is running</b>\n"
         "🕐 Last check: 12:00 PYT · 2 watches active\n"
         "\n"
-        '🎮 <b>Chromatic Codex</b> — ⏳ Not in stock yet · expected November 19 · US$200.00 · <a href="https://openai.com/supply/co-lab/chromatic/">View</a>\n'
-        '⚔️ <b>Ezra Legacy Lightsaber Set</b> — ⏳ Not in stock yet · expected November 17 · US$400.00 · <a href="https://www.disneystore.com/ezra-example">View</a>\n'
+        "🎮 <b>Chromatic Codex</b>\n"
+        "📦 <b>Status:</b> ⏳ Not in stock yet\n"
+        "📅 <b>Expected date:</b> November 19\n"
+        "💵 <b>Price:</b> US$200.00\n"
+        "\n"
+        "⚔️ <b>Ezra Legacy Lightsaber Set</b>\n"
+        "📦 <b>Status:</b> ⏳ Not in stock yet\n"
+        "📅 <b>Expected date:</b> November 17\n"
+        "💵 <b>Price:</b> US$400.00\n"
         "\n"
         "⏰ Reminder: Chromatic Codex — Nov 19, 07:00 PYT\n"
         "\n"
@@ -550,6 +562,17 @@ def test_build_heartbeat_text_lists_watches_and_reminder():
     )
     assert "TEST" not in text
     assert "the Chromatic" not in text
+    assert "View" not in text
+    assert "<a " not in text
+    keyboard = core.build_heartbeat_keyboard(cfg)
+    assert keyboard == {
+        "inline_keyboard": [
+            [
+                {"text": "🎮 Open Chromatic", "url": "https://openai.com/supply/co-lab/chromatic/"},
+                {"text": "⚔️ Open Ezra", "url": "https://www.disneystore.com/ezra-example"},
+            ]
+        ]
+    }
 
 
 def test_build_heartbeat_generic_watch_and_singular():
@@ -575,8 +598,14 @@ def test_build_heartbeat_generic_watch_and_singular():
     now = datetime(2026, 11, 16, 9, 0, tzinfo=core.TZ)
     text = core.build_heartbeat_text(cfg, state, now=now)
     assert "1 watch active" in text
-    assert "🎟️ <b>Movie tickets</b> — 👀 Watching" in text
+    assert "🎟️ <b>Movie tickets</b>" in text
+    assert "📦 <b>Status:</b> 👀 Watching" in text
     assert "I'll ping you the moment something changes." in text
+    assert core.build_heartbeat_keyboard(cfg) == {
+        "inline_keyboard": [
+            [{"text": "🎟️ Open Movie", "url": "https://example.com/tickets"}]
+        ]
+    }
 
 
 def test_html_to_plain_strips_markup_and_keeps_link_target():
@@ -588,7 +617,12 @@ def test_html_to_plain_strips_markup_and_keeps_link_target():
 
 def test_maybe_specials_sends_rich_heartbeat_once(tmp_state, monkeypatch):
     sent = []
-    monkeypatch.setattr(core, "tg_send", lambda text: sent.append(text) or True)
+
+    def fake_tg(text, reply_markup=None):
+        sent.append({"text": text, "reply_markup": reply_markup})
+        return True
+
+    monkeypatch.setattr(core, "tg_send", fake_tg)
     monkeypatch.setattr(core, "now_mx", lambda: datetime(2026, 11, 16, 10, 0, tzinfo=core.TZ))
     cfg = _heartbeat_cfg()
     cfg["topic"] = "restockr-no-topic"
@@ -598,9 +632,12 @@ def test_maybe_specials_sends_rich_heartbeat_once(tmp_state, monkeypatch):
     chromatic = next(p for p in products if p["id"] == "chromatic")
     core.maybe_specials(cfg, state, chromatic, core.product_state(state, chromatic), "out_of_stock")
     assert len(sent) == 1
-    assert sent[0].startswith("🟢 <b>Restockr is running</b>")
-    assert "13:00 PYT" in sent[0]  # 10:00 Mexico City
-    assert "2 watches active" in sent[0]
+    assert sent[0]["text"].startswith("🟢 <b>Restockr is running</b>")
+    assert "13:00 PYT" in sent[0]["text"]  # 10:00 Mexico City
+    assert "2 watches active" in sent[0]["text"]
+    assert "📦 <b>Status:</b> ⏳ Not in stock yet" in sent[0]["text"]
+    assert sent[0]["reply_markup"] == core.build_heartbeat_keyboard(cfg)
+    assert sent[0]["reply_markup"]["inline_keyboard"][0][0]["text"] == "🎮 Open Chromatic"
     assert "2026-11-16" in state["heartbeat_dates"]
     sent.clear()
     core.maybe_specials(cfg, state, chromatic, core.product_state(state, chromatic), "out_of_stock")
@@ -609,7 +646,7 @@ def test_maybe_specials_sends_rich_heartbeat_once(tmp_state, monkeypatch):
 
 def test_heartbeat_skipped_when_primary_is_in_stock(tmp_state, monkeypatch):
     sent = []
-    monkeypatch.setattr(core, "tg_send", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(core, "tg_send", lambda text, reply_markup=None: sent.append(text) or True)
     monkeypatch.setattr(core, "now_mx", lambda: datetime(2026, 11, 16, 10, 0, tzinfo=core.TZ))
     cfg = _heartbeat_cfg()
     cfg["topic"] = "restockr-no-topic"

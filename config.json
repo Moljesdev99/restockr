@@ -9,7 +9,8 @@
       "emoji": "🎮",
       "is_test": false,
       "primary": true,
-      "remind_on": "2026-11-19 07:00"
+      "remind_on": "2026-11-19 06:00",
+      "timezone": "America/Mexico_City"
     },
     {
       "id": "disney-ezra",

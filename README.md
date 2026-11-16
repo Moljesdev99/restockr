@@ -11,7 +11,7 @@ It is not limited to shop restocks. Restocks are one watch type among several.
 - Watches one or more web pages, day and night, even if your computer is off.
 - Sends a **Telegram card** with a photo (when one is available), a short status, and a button: **🛒 View product** for restocks, **🔗 Open page** for everything else.
 - Optionally sends the same alert to ntfy.
-- Every day at **09:00 Mexico City time** (`America/Mexico_City`), it sends a heartbeat listing every active watch, as long as the primary restock item is not in stock. Times in that message are shown in Paraguay time (`America/Asuncion`, labeled PYT).
+- Every day at **09:00 Mexico City time** (`America/Mexico_City`), it sends a heartbeat listing every active watch (name, status, expected date, and price), as long as the primary restock item is not in stock. Each product has a Telegram button to open its page. Times in that message are shown in Paraguay time (`America/Asuncion`, labeled PYT).
 - It keeps running until you **disable the workflow**. There is no built-in end date.
 - A long run reloads `config.json` from this repository about every five minutes, so new or edited watches apply without waiting for the next job.
 
@@ -37,7 +37,7 @@ GitHub Actions
         │
         └─ Once a day, at 09:00 Mexico City time:
               “🟢 Restockr is running”
-              (with each watch, its status, and any upcoming reminder)
+              (with each watch, its status, and a button to open the page)
 ```
 
 It does not use AI and does not spend tokens. Bot credentials are stored as **GitHub Actions secrets**, not in the code.
@@ -90,11 +90,12 @@ Copy an example into your `config.json`, then put **your** URL and wording. The 
   "emoji": "🎮",
   "type": "restock",
   "primary": true,
-  "remind_on": "2026-11-19 07:00"
+  "remind_on": "2026-11-19 06:00",
+  "timezone": "America/Mexico_City"
 }
 ```
 
-`short_name` is a short form of the product name. `remind_on` is optional; omit it unless you want a same-day reminder for *that* watch.
+`short_name` is a short form of the product name. `remind_on` is optional; omit it unless you want a same-day reminder for *that* watch. The example above fires at 06:00 Mexico City time (09:00 PYT).
 
 ### Movie or series release / tickets on sale
 
@@ -212,7 +213,7 @@ A full starter file is in [`config.example.json`](config.example.json).
 | 🟢 Price is US$180.00 (threshold US$200.00) | `price_below` |
 | 🔔 The page content changed | `changed` |
 | ⏰ Restock is today / Today is the expected date | Only if that watch has `remind_on` (or `expected_date` + `reminder`) and that date has been reached |
-| 🟢 Restockr is running | Daily heartbeat listing every active watch (if the primary restock item is not in stock) |
+| 🟢 Restockr is running | Daily heartbeat listing every active watch, with a button to open each page (if the primary restock item is not in stock) |
 | ⚠️ I could not read … N times in a row | 5 consecutive failures (possible block). It keeps retrying, with longer waits |
 | ✅ Watcher recovered | It could read the page again after that block |
 
