@@ -49,6 +49,8 @@ def _env_creds():
 
 
 core._tg_creds = _env_creds
+# The cloud watcher is the one that answers /status and /reset.
+core.TG_REPLY_COMMANDS = True
 
 
 def _with_topic(data: dict) -> dict:
@@ -179,7 +181,11 @@ def summary_text(products, results) -> str:
 def run_once(cfg, state, products):
     results: dict = {}
     extra = 0.0
+    core.set_poll_context(cfg, state, products)
+    core.poll_telegram(force=True)
     for product in products:
+        if not core.should_check(state, product):
+            continue
         try:
             info = check_page(product)
             core.handle_check(cfg, state, product, info)

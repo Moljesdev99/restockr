@@ -10,6 +10,7 @@ It is not limited to shop restocks. Restocks are one watch type among several.
 
 - Watches one or more web pages, day and night, even if your computer is off.
 - Sends a **Telegram card** with a photo (when one is available), a short status, and a button: **🛒 View product** for restocks, **🔗 Open page** for everything else.
+- In-stock and waiting-room alerts add **✅ Bought it**, **🚫 Not buying**, and **🔔 Keep alerting** buttons so you can stop or extend the repeats. See [Alert buttons](#alert-buttons).
 - Optionally sends the same alert to ntfy.
 - Every day at **09:00 Mexico City time** (`America/Mexico_City`), it sends a heartbeat listing every active watch (name, status, expected date, and price), as long as the primary restock item is not in stock. Each product has a Telegram button to open its page. Times in that message are shown in Paraguay time (`America/Asuncion`, labeled PYT).
 - It keeps running until you **disable the workflow**. There is no built-in end date.
@@ -204,7 +205,7 @@ A full starter file is in [`config.example.json`](config.example.json).
 | Alert | Meaning |
 |---|---|
 | ☁️ Restockr cloud watcher: active | Startup or test run: whether each page could be read |
-| 📦 Status: 🟢 In stock, buy now! | Restock: the product is available. Repeated every 2 minutes, up to 10 times |
+| 📦 Status: 🟢 In stock, buy now! | Restock: the product is available. Repeated every 2 minutes, up to 30 times (about 1 hour), or with no limit after **🔔 Keep alerting**. Carries the alert buttons below |
 | 📅 Restock date changed | The page now shows a different expected date |
 | ⚪ Sold out again | It was in stock and sold out again |
 | 🚦 The virtual waiting room is open! Join now | Restock: the page redirected to a `queue.*` host or a Queue-it page (as Disney does). Up to 3 alerts, 3 minutes apart |
@@ -219,6 +220,24 @@ A full starter file is in [`config.example.json`](config.example.json).
 | ✅ Watcher recovered | It could read the page again after that block |
 
 If an entry has `"is_test": true`, its alerts are prefixed with **🧪 Test**.
+
+### Alert buttons
+
+In-stock, waiting-room-open, and waiting-room-over cards for a `restock` watch carry, under **🛒 View product**, three buttons:
+
+| Button | Effect |
+|---|---|
+| **✅ Bought it** | Stops every alert for that watch (in stock, waiting room, date change, sold out, reminder). The card changes to “✅ Bought — alerts off” with a **↩️ Resume** button |
+| **🚫 Not buying** | Same as above, recorded as skipped |
+| **🔔 Keep alerting** | Removes the 30-repeat limit: you are alerted every 2 minutes for as long as it is in stock, including after it sells out and restocks, until you tap Bought it or Not buying |
+
+If you do not tap anything, alerts keep repeating every 2 minutes, up to 30 times per restock.
+
+A muted watch stays muted (also across restocks) until you tap **↩️ Resume** or send `/reset <id>` (or `/reset all`). It is then only read every 30 minutes, so the daily heartbeat stays accurate without using a check every minute. Other watches are not affected.
+
+Commands you can send to the bot: `/status` (each watch, its status and alert mode) and `/reset <id|all>` (alias `/unmute`). Only messages from your `TG_CHAT` are accepted.
+
+**How taps are read.** There is no webhook server. While waiting between checks, each watcher calls Telegram’s `getUpdates` every 3 seconds (callback queries and messages only) and answers the tap with a short confirmation. Because the cloud watcher and an optional second watcher can share the same bot, updates are **not** consumed right away: each watcher stores the last `update_id` it handled in its own `state.json`, and an update is only confirmed (removed from Telegram’s queue) 12 hours after it was first seen. So both watchers apply every tap to their own state. Only the cloud watcher replies to `/status` and `/reset`. Do not point a webhook or another `getUpdates` consumer at the same bot.
 
 ## Requirements
 

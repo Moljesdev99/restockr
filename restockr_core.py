@@ -46,7 +46,25 @@ DELIVERY_MAX_ATTEMPTS = 12
 CHECK_MIN_S, CHECK_MAX_S = 60, 120
 TIGHT_CHECK_MIN_S, TIGHT_CHECK_MAX_S = 60, 75
 IN_STOCK_REPEAT_S = 120
-IN_STOCK_ALERT_MAX = 10
+# Default number of in-stock repeats (every IN_STOCK_REPEAT_S, so about 1 hour).
+# "🔔 Keep alerting" removes the cap; "✅ Bought it" / "🚫 Not buying" mute the watch.
+IN_STOCK_ALERT_MAX = 30
+# Telegram button taps / commands (getUpdates short polling, no webhook).
+TG_POLL_S = 3.0
+# Updates are confirmed (deleted from Telegram's queue) only after this many
+# seconds, so a second watcher sharing the bot can still read every tap.
+TG_UPDATE_RETAIN_S = 12 * 3600
+# Only one watcher should answer text commands (/status, /reset); the cloud
+# watcher sets this to True. Both watchers still apply the state change.
+TG_REPLY_COMMANDS = False
+TG_COMMAND_MAX_AGE_S = 600
+# A muted watch ("Bought it" / "Not buying") is only re-read this often, so the
+# heartbeat stays fresh without spending a check every minute.
+MUTED_CHECK_S = 1800
+ALERT_MODE_KEEP, ALERT_MODE_BOUGHT, ALERT_MODE_SKIP = "keep", "bought", "skip"
+MUTED_MODES = (ALERT_MODE_BOUGHT, ALERT_MODE_SKIP)
+# Alert kinds that get the Bought it / Not buying / Keep alerting buttons.
+CONTROL_KINDS = ("in_stock", "queue", "queue_ended")
 # Virtual waiting room (Queue-it). The "open" alert repeats up to QUEUE_ALERT_MAX
 # times, QUEUE_ALERT_GAP_S apart, while the page keeps redirecting to the queue.
 # The "over" alert fires once, after QUEUE_END_CONFIRM reachable reads in a row
@@ -500,12 +518,18 @@ def _tg_creds() -> tuple[str, str] | None:
     return token, chat
 
 
-def _tg_post(method: str, fields: dict, file_field: tuple[str, str, bytes] | None = None) -> dict:
+def _tg_post(
+    method: str,
+    fields: dict,
+    file_field: tuple[str, str, bytes] | None = None,
+    *,
+    with_chat: bool = True,
+) -> dict:
     creds = _tg_creds()
     if not creds:
         raise RuntimeError("Telegram credentials missing")
     token, chat = creds
-    fields = {"chat_id": chat, **fields}
+    fields = {"chat_id": chat, **fields} if with_chat else dict(fields)
     url = f"https://api.telegram.org/bot{token}/{method}"
     if file_field is None:
         data = urllib.parse.urlencode(fields).encode()
@@ -568,6 +592,287 @@ def tg_send(text: str, reply_markup: dict | str | None = None) -> bool:
     except Exception as exc:
         log.error("telegram failed: %s", exc)
         return False
+
+
+# ---------- alert controls (inline buttons + commands) ----------
+_poll_ctx: dict = {}
+_last_poll = 0.0
+
+
+def alert_mode(state: dict | None, product: dict | None) -> str | None:
+    if not state or not product or not product.get("id"):
+        return None
+    bucket = state.get("products") or {}
+    return (bucket.get(product["id"]) or {}).get("alert_mode")
+
+
+def is_muted(state: dict | None, product: dict | None) -> bool:
+    return alert_mode(state, product) in MUTED_MODES
+
+
+def in_stock_cap(state: dict | None, product: dict | None) -> int | None:
+    """Max in-stock repeats; None means unlimited ("Keep alerting")."""
+    return None if alert_mode(state, product) == ALERT_MODE_KEEP else IN_STOCK_ALERT_MAX
+
+
+def should_check(state: dict, product: dict, now: float | None = None) -> bool:
+    """Muted watches are only re-read every MUTED_CHECK_S (heartbeat freshness)."""
+    if not is_muted(state, product):
+        return True
+    now = time.time() if now is None else now
+    pstate = product_state(state, product)
+    last = float(pstate.get("last_muted_check") or 0)
+    if now - last >= MUTED_CHECK_S:
+        pstate["last_muted_check"] = now
+        return True
+    return False
+
+
+def _cb_pid(pid: str) -> str:
+    """Product id as it fits in callback_data (64 bytes max)."""
+    if len(pid.encode("utf-8")) <= 50:
+        return pid
+    return "#" + hashlib.sha1(pid.encode("utf-8")).hexdigest()[:12]
+
+
+def _find_product(products: list[dict] | None, token: str) -> dict | None:
+    for p in products or []:
+        pid = str(p.get("id") or "")
+        if pid and (pid == token or _cb_pid(pid) == token):
+            return p
+    return None
+
+
+def _url_row(product: dict) -> list[dict]:
+    return [{"text": button_label(product), "url": product.get("url") or PRODUCT_URL}]
+
+
+def build_alert_keyboard(product: dict, mode: str | None = None) -> dict:
+    """View product + the three alert-control buttons (or the chosen state)."""
+    product = _prod(product)
+    cid = _cb_pid(str(product.get("id") or "p"))
+    rows = [_url_row(product)]
+    if mode in MUTED_MODES:
+        label = "✅ Bought — alerts off" if mode == ALERT_MODE_BOUGHT else "🚫 Not buying — alerts off"
+        rows.append([
+            {"text": label, "callback_data": f"rs|n|{cid}"},
+            {"text": "↩️ Resume", "callback_data": f"rs|r|{cid}"},
+        ])
+        return {"inline_keyboard": rows}
+    keep = "🔔 Keep alerting ✓" if mode == ALERT_MODE_KEEP else "🔔 Keep alerting"
+    rows.append([
+        {"text": "✅ Bought it", "callback_data": f"rs|b|{cid}"},
+        {"text": "🚫 Not buying", "callback_data": f"rs|s|{cid}"},
+    ])
+    rows.append([{"text": keep, "callback_data": f"rs|k|{cid}"}])
+    return {"inline_keyboard": rows}
+
+
+def set_alert_mode(state: dict, product: dict, mode: str | None) -> None:
+    """Change a watch's alert mode and drop alerts that should no longer go out."""
+    pstate = product_state(state, product)
+    pstate["alert_mode"] = mode
+    pstate["alert_mode_ts"] = now_mx().isoformat()
+    pid = product.get("id")
+    if mode in MUTED_MODES:
+        state["pending_events"] = [
+            e for e in (state.get("pending_events") or [])
+            if not (e.get("watch_id") == pid and e.get("kind") != "heartbeat")
+        ]
+    elif mode is None:
+        # Fresh start: allow a new round of in-stock alerts right away.
+        pstate["in_stock_alerts_sent"] = 0
+        pstate["last_in_stock_alert_ts"] = None
+        pstate["last_muted_check"] = 0
+    log.info("Alert mode for %s -> %s", pid, mode or "default")
+    save_state(state)
+
+
+def set_poll_context(cfg: dict, state: dict, products: list[dict]) -> None:
+    _poll_ctx.update(cfg=cfg, state=state, products=products)
+
+
+def _chat_ok(chat_id) -> bool:
+    creds = _tg_creds()
+    return bool(creds) and str(chat_id) == str(creds[1])
+
+
+def _answer_callback(cq_id: str, text: str) -> None:
+    try:
+        _tg_post(
+            "answerCallbackQuery",
+            {"callback_query_id": cq_id, "text": text[:190]},
+            with_chat=False,
+        )
+    except Exception as exc:  # already answered by the other watcher, expired, ...
+        log.info("answerCallbackQuery skipped: %s", exc)
+
+
+def _edit_markup(chat_id, message_id, markup: dict) -> None:
+    try:
+        _tg_post(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": json.dumps(markup, ensure_ascii=False),
+            },
+            with_chat=False,
+        )
+    except Exception as exc:  # "message is not modified" when both watchers edit
+        log.info("editMessageReplyMarkup skipped: %s", exc)
+
+
+_CB_TOAST = {
+    "b": "✅ Nice! No more alerts for {name}.",
+    "s": "🚫 OK, alerts off for {name}.",
+    "k": "🔔 OK, I'll keep alerting until you buy {name}.",
+    "r": "↩️ Alerts are back on for {name}.",
+    "n": "Alerts are off for {name}. Tap Resume to turn them back on.",
+}
+_CB_MODE = {"b": ALERT_MODE_BOUGHT, "s": ALERT_MODE_SKIP, "k": ALERT_MODE_KEEP, "r": None}
+
+
+def handle_callback(state: dict, products: list[dict], cq: dict) -> None:
+    msg = cq.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    if not _chat_ok(chat_id):
+        log.warning("Ignoring button tap from another chat")
+        return
+    parts = str(cq.get("data") or "").split("|", 2)
+    if len(parts) != 3 or parts[0] != "rs" or parts[1] not in _CB_TOAST:
+        _answer_callback(cq.get("id"), "Unknown button")
+        return
+    action, token = parts[1], parts[2]
+    product = _find_product(products, token)
+    if not product:
+        _answer_callback(cq.get("id"), "This watch is no longer in the config.")
+        return
+    name = heartbeat_display_name(product)
+    if action != "n":
+        set_alert_mode(state, product, _CB_MODE[action])
+    _answer_callback(cq.get("id"), _CB_TOAST[action].format(name=name))
+    if msg.get("message_id") and action != "n":
+        _edit_markup(chat_id, msg["message_id"], build_alert_keyboard(product, _CB_MODE[action]))
+
+
+def _mode_label(mode: str | None) -> str:
+    return {
+        ALERT_MODE_BOUGHT: "✅ bought, alerts off",
+        ALERT_MODE_SKIP: "🚫 not buying, alerts off",
+        ALERT_MODE_KEEP: "🔔 keep alerting",
+    }.get(mode or "", "🔔 alerts on")
+
+
+def build_status_text(state: dict, products: list[dict]) -> str:
+    lines = ["📋 <b>Restockr status</b>"]
+    bucket = state.get("products") or {}
+    for p in products:
+        ps = bucket.get(p.get("id") or "") or {}
+        lines.append(
+            f"{p.get('emoji') or '•'} <b>{htmlmod.escape(heartbeat_display_name(p))}</b> "
+            f"(<code>{htmlmod.escape(str(p.get('id')))}</code>): "
+            f"{htmlmod.escape(heartbeat_watch_status(p, ps))} · {_mode_label(ps.get('alert_mode'))}"
+        )
+    lines += ["", "/reset &lt;id|all&gt; turns alerts back on."]
+    return "\n".join(lines)
+
+
+def handle_command(state: dict, products: list[dict], msg: dict) -> str | None:
+    """Apply a text command. Returns the reply text (sent only by one watcher)."""
+    if not _chat_ok((msg.get("chat") or {}).get("id")):
+        return None
+    text = str(msg.get("text") or "").strip()
+    if not text.startswith("/"):
+        return None
+    cmd, _, arg = text.partition(" ")
+    cmd = cmd.split("@", 1)[0].lower()
+    arg = arg.strip()
+    if cmd in ("/status", "/start", "/help"):
+        return build_status_text(state, products)
+    if cmd in ("/reset", "/unmute", "/resume"):
+        if not arg:
+            return "Usage: /reset &lt;id&gt; or /reset all\n\n" + build_status_text(state, products)
+        targets = list(products) if arg.lower() == "all" else [
+            p for p in products
+            if str(p.get("id")).lower() == arg.lower()
+            or heartbeat_display_name(p).lower() == arg.lower()
+        ]
+        if not targets:
+            return f"No watch named <code>{htmlmod.escape(arg)}</code>.\n\n" + build_status_text(state, products)
+        for p in targets:
+            set_alert_mode(state, p, None)
+        names = ", ".join(htmlmod.escape(heartbeat_display_name(p)) for p in targets)
+        return f"↩️ Alerts are back on for {names}."
+    return None
+
+
+def poll_telegram(force: bool = False) -> int:
+    """Read button taps and commands. Returns the number of new updates handled.
+
+    Two watchers share one bot, so updates are NOT consumed right away: each
+    watcher remembers the last update_id it handled (in its own state) and
+    only confirms (deletes) updates first seen more than TG_UPDATE_RETAIN_S
+    ago. Both watchers therefore apply every tap to their own state.
+    """
+    global _last_poll
+    if TEST_MODE or not _poll_ctx.get("state"):
+        return 0
+    now_m = time.monotonic()
+    if not force and now_m - _last_poll < TG_POLL_S:
+        return 0
+    _last_poll = now_m
+    state = _poll_ctx["state"]
+    products = _poll_ctx.get("products") or []
+    fields = {
+        "timeout": 0,
+        "limit": 100,
+        "allowed_updates": json.dumps(["callback_query", "message"]),
+    }
+    if state.get("tg_confirm_offset"):
+        fields["offset"] = int(state["tg_confirm_offset"])
+    try:
+        data = _tg_post("getUpdates", fields, with_chat=False)
+    except urllib.error.HTTPError as exc:
+        log.info("getUpdates HTTP %s (another poll in flight?)", exc.code)
+        return 0
+    except Exception as exc:
+        log.info("getUpdates failed: %s", exc)
+        return 0
+    if not data.get("ok"):
+        log.info("getUpdates not ok: %s", data.get("description"))
+        return 0
+    last_id = int(state.get("tg_last_update_id") or 0)
+    seen = state.setdefault("tg_seen", {})
+    now = time.time()
+    handled = 0
+    for upd in data.get("result") or []:
+        uid = int(upd.get("update_id") or 0)
+        seen.setdefault(str(uid), now)
+        if uid <= last_id:
+            continue
+        last_id = uid
+        handled += 1
+        try:
+            if upd.get("callback_query"):
+                handle_callback(state, products, upd["callback_query"])
+            elif upd.get("message"):
+                msg = upd["message"]
+                reply = handle_command(state, products, msg)
+                fresh = now - float(msg.get("date") or 0) <= TG_COMMAND_MAX_AGE_S
+                if reply and TG_REPLY_COMMANDS and fresh:
+                    tg_send(reply)
+        except Exception:
+            log.exception("Failed to handle Telegram update %s", uid)
+    state["tg_last_update_id"] = last_id
+    old = [int(k) for k, t in seen.items() if now - float(t) >= TG_UPDATE_RETAIN_S]
+    if old:
+        offset = max(old) + 1
+        state["tg_confirm_offset"] = max(offset, int(state.get("tg_confirm_offset") or 0))
+        state["tg_seen"] = {k: t for k, t in seen.items() if int(k) >= state["tg_confirm_offset"]}
+    if handled or old:
+        save_state(state)
+    return handled
 
 
 _MONTHS_ES = {
@@ -955,6 +1260,7 @@ def tg_send_card(
     product: dict | None = None,
     is_test: bool = False,
     event_line: str | None = None,
+    reply_markup: dict | None = None,
 ) -> bool:
     """Product card via sendPhoto; falls back to sendMessage if no image."""
     product = _prod(product)
@@ -968,7 +1274,7 @@ def tg_send_card(
     image_url = entry_image(product, info, state)
     url = product.get("url") or PRODUCT_URL
     markup = json.dumps(
-        {"inline_keyboard": [[{"text": button_label(product), "url": url}]]},
+        reply_markup or {"inline_keyboard": [[{"text": button_label(product), "url": url}]]},
         ensure_ascii=False,
     )
     fields = {
@@ -2170,6 +2476,9 @@ def enqueue_alert(
     if TEST_MODE:
         return None
     product = product or {}
+    if kind != "heartbeat" and is_muted(state, product):
+        log.info("Muted (%s): not sending %s for %s", alert_mode(state, product), kind, product.get("id"))
+        return None
     pstate = pstate or {}
     info = info or {}
     event = {
@@ -2204,6 +2513,7 @@ def enqueue_alert(
         "title": title,
         "use_card": use_card,
         "reply_markup": reply_markup,
+        "alert_mode": alert_mode(state, product),
         "created_ts": now_mx().isoformat(),
         "channels": {
             "telegram": {"status": "pending", "attempts": 0, "last_attempt_ts": None},
@@ -2218,7 +2528,7 @@ def enqueue_alert(
     if coalesce:
         for existing in pending:
             if existing.get("watch_id") == event["watch_id"] and existing.get("kind") == kind:
-                for key in ("event_line", "info", "pstate", "product", "text", "title", "priority", "tags", "use_card", "is_test", "reply_markup"):
+                for key in ("event_line", "info", "pstate", "product", "text", "title", "priority", "tags", "use_card", "is_test", "reply_markup", "alert_mode"):
                     existing[key] = event[key]
                 existing["updated_ts"] = event["created_ts"]
                 log.info("Coalesced pending event watch=%s kind=%s", event["watch_id"], kind)
@@ -2234,6 +2544,9 @@ def _send_event_channel(cfg: dict, channel: str, event: dict, product: dict) -> 
     pstate = event.get("pstate") or {}
     if channel == "telegram":
         if event.get("use_card"):
+            markup = None
+            if event.get("kind") in CONTROL_KINDS and is_restock(product) and product.get("id"):
+                markup = build_alert_keyboard(product, event.get("alert_mode"))
             return bool(
                 tg_send_card(
                     info,
@@ -2241,6 +2554,7 @@ def _send_event_channel(cfg: dict, channel: str, event: dict, product: dict) -> 
                     product=product,
                     is_test=bool(event.get("is_test")),
                     event_line=event.get("event_line"),
+                    reply_markup=markup,
                 )
             )
         return bool(
@@ -2371,6 +2685,10 @@ def heartbeat_watch_status(product: dict | None, pstate: dict | None = None) -> 
     """Compact status line for the daily heartbeat."""
     product = product or {}
     pstate = pstate or {}
+    if pstate.get("alert_mode") == ALERT_MODE_BOUGHT:
+        return "✅ Bought (alerts off)"
+    if pstate.get("alert_mode") == ALERT_MODE_SKIP:
+        return "🚫 Not buying (alerts off)"
     status = pstate.get("last_status")
     if is_restock(product) and pstate.get("queue_active"):
         status = "queue"
@@ -2796,7 +3114,8 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
                 due = (now_mx() - last).total_seconds() >= IN_STOCK_REPEAT_S
             except Exception:
                 due = True
-        if due and sent < IN_STOCK_ALERT_MAX:
+        cap = in_stock_cap(state, product)
+        if due and (cap is None or sent < cap):
             n = sent + 1
             emit_alert(
                 cfg,
@@ -2993,6 +3312,10 @@ def sleep_jitter(
     wall_end = time.time() + total
     # Guard against monotonic clock jumps (box suspend/restore): also stop on wall clock.
     while time.monotonic() < end and time.time() < wall_end and not _stop:
+        try:
+            poll_telegram()
+        except Exception:
+            log.exception("Telegram poll failed")
         time.sleep(max(0.0, min(1.0, end - time.monotonic(), wall_end - time.time())))
 
 
@@ -3017,9 +3340,10 @@ def any_in_stock_repeat(state: dict, products: list[dict], last_results: dict) -
     for p in products:
         info = last_results.get(p["id"]) or {}
         pstate = product_state(state, p)
-        if info.get("status") == "in_stock" and int(
-            pstate.get("in_stock_alerts_sent") or 0
-        ) < IN_STOCK_ALERT_MAX:
+        if info.get("status") != "in_stock" or is_muted(state, p):
+            continue
+        cap = in_stock_cap(state, p)
+        if cap is None or int(pstate.get("in_stock_alerts_sent") or 0) < cap:
             return True
     return False
 
@@ -3055,12 +3379,16 @@ def main() -> int:
     try:
         while not _stop:
             maybe_rotate_log()
+            set_poll_context(cfg, state, products)
+            poll_telegram(force=True)
             flush_pending(cfg, state, products)
             extra = 0.0
             last_results: dict = {}
             for product in products:
                 if _stop:
                     break
+                if not should_check(state, product):
+                    continue
                 try:
                     info = check_page(product)
                     handle_check(cfg, state, product, info)
