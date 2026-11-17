@@ -486,7 +486,27 @@ def test_check_interval_not_faster_than_60s():
         now=now, products=products, in_stock_repeat=True
     )
     assert low2 >= 60
-    assert (low2, high2) == (float(core.IN_STOCK_REPEAT_S), float(core.IN_STOCK_REPEAT_S))
+    # An in-stock repeat must not slow the tight restock-day interval
+    assert (low2, high2) == (60.0, 75.0)
+    normal = datetime(2026, 11, 18, 7, 0, tzinfo=core.DISPLAY_TZ)
+    assert core.check_interval_range(
+        now=normal, products=products, in_stock_repeat=True
+    ) == (60.0, float(core.IN_STOCK_REPEAT_S))
+
+
+def test_failure_backoff_is_capped_on_reminder_day(monkeypatch):
+    products = [{"id": "chromatic", "remind_on": "2026-11-19 06:00", "timezone": "America/Mexico_City"}]
+    products[0]["remind_at"] = core.parse_remind_at(products[0])
+    logged = []
+    monkeypatch.setattr(core.log, "info", lambda msg, *a: logged.append(a[0] if a else None))
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    monkeypatch.setattr(core, "_stop", True)  # do not actually wait
+    drop_day = datetime(2026, 11, 19, 0, 30, tzinfo=core.DISPLAY_TZ)
+    core.sleep_jitter(extra=600.0, products=products, now=drop_day)
+    assert logged[-1] <= 75.0 + core.REMINDER_DAY_BACKOFF_CAP_S
+    other_day = datetime(2026, 11, 18, 12, 0, tzinfo=core.DISPLAY_TZ)
+    core.sleep_jitter(extra=600.0, products=products, now=other_day)
+    assert logged[-1] >= 660.0
 
 
 # --- Daily heartbeat --------------------------------------------------------

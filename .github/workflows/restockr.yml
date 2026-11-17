@@ -83,11 +83,15 @@ jobs:
           if-no-files-found: ignore
 
       # Queue the next watch immediately after this job (including state save)
-      # finishes. Concurrency still allows only one active watch. Cron remains
-      # as a backup if this dispatch is skipped (failed/short runs).
+      # finishes. Concurrency still allows only one active watch. A crashed
+      # watch is also re-queued (after a short pause, so a crash loop stays
+      # slow) because GitHub's cron backup can lag by 30+ minutes.
       - name: Queue the next watch run
-        if: ${{ always() && (github.event.inputs.mode || 'watch') == 'watch' && (steps.watch.conclusion == 'success' || steps.watch.conclusion == 'cancelled') }}
+        if: ${{ always() && (github.event.inputs.mode || 'watch') == 'watch' && steps.watch.conclusion != 'skipped' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          WATCH_RESULT: ${{ steps.watch.conclusion }}
         continue-on-error: true
-        run: gh workflow run restockr.yml --ref "$GITHUB_REF_NAME" -f mode=watch
+        run: |
+          if [ "$WATCH_RESULT" = "failure" ]; then sleep 60; fi
+          gh workflow run restockr.yml --ref "$GITHUB_REF_NAME" -f mode=watch

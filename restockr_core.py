@@ -61,6 +61,7 @@ RENDER_WAIT_MS = 4_000
 MAX_CONSECUTIVE_FAILURES_BEFORE_WARN = 5
 BROWSER_RESTART_EVERY = 40
 BACKOFF_CAP_S = 600
+REMINDER_DAY_BACKOFF_CAP_S = 30
 
 CHROME_ARGS = [
     "--no-sandbox",
@@ -265,16 +266,29 @@ def check_interval_range(
     products=None,
     in_stock_repeat: bool = False,
 ) -> tuple[float, float]:
-    """Seconds between checks. Tightens to 60-75s on a reminder day (PYT)."""
+    """Seconds between checks. Tightens to 60-75s on a reminder day (PYT).
+
+    While an in-stock alert is repeating, checks never get slower than the
+    normal (or reminder-day) interval: one watch staying in stock must not
+    slow down the others on their restock day.
+    """
+    low, high = float(CHECK_MIN_S), float(CHECK_MAX_S)
+    if is_reminder_day(now, products):
+        low, high = float(TIGHT_CHECK_MIN_S), float(TIGHT_CHECK_MAX_S)
     if in_stock_repeat:
-        return float(IN_STOCK_REPEAT_S), float(IN_STOCK_REPEAT_S)
+        repeat = float(IN_STOCK_REPEAT_S)
+        return min(low, repeat), min(high, repeat)
+    return low, high
+
+
+def is_reminder_day(now=None, products=None) -> bool:
+    """True when today (America/Asuncion) is a configured reminder date."""
+    if not products:
+        return False
     now = now or datetime.now(DISPLAY_TZ)
     if now.tzinfo is None:
         now = now.replace(tzinfo=TZ)
-    local_date = now.astimezone(DISPLAY_TZ).date()
-    if products and local_date in reminder_local_dates(products):
-        return float(TIGHT_CHECK_MIN_S), float(TIGHT_CHECK_MAX_S)
-    return float(CHECK_MIN_S), float(CHECK_MAX_S)
+    return now.astimezone(DISPLAY_TZ).date() in reminder_local_dates(products)
 
 
 def watch_fingerprint(entry: dict) -> str:
@@ -1152,6 +1166,51 @@ def disney_html_stock(html: str) -> str | None:
     return None
 
 
+def is_supply(product: dict | None) -> bool:
+    return "openai.com/supply" in ((product or {}).get("url") or "").lower()
+
+
+_SUPPLY_BTN = re.compile(
+    r"(<button\b[^>]*data-analytics=[\"']supply-add-to-cart[\"'][^>]*>)(.*?)</button>",
+    re.I | re.S,
+)
+_SUPPLY_PRODUCT_JSON = re.compile(
+    r'\\?"product\\?"\s*:\s*\{\s*\\?"id\\?"\s*:\s*\\?"gid://shopify/Product/\d+\\?"\s*,'
+    r'\s*\\?"handle\\?"\s*:\s*\\?"[^"\\]*\\?"\s*,\s*\\?"availableForSale\\?"\s*:\s*(true|false)',
+    re.I,
+)
+_SUPPLY_OOS_LABEL = re.compile(r"restock\s*soon|out\s*of\s*stock|sold\s*out|coming\s*soon|notify\s*me", re.I)
+
+
+def supply_html_stock(html: str) -> str | None:
+    """Stock status for an OpenAI Supply Co. product page (Next.js + Shopify).
+
+    Uses only the main product's own signals, so "Restock soon" text elsewhere
+    on the page (related items, FAQ copy) cannot hide a restock:
+    - the first ``data-analytics="supply-add-to-cart"`` button. The site sets
+      ``data-supply-out-of-stock="true"`` only when every variant is
+      unavailable. The server-rendered button is always ``disabled`` until the
+      cart script loads, so ``disabled`` alone means nothing.
+    - the main product's Shopify ``availableForSale`` flag in the page data.
+    Either positive signal counts as in stock (a missed restock is worse than a
+    false alarm). Returns None when neither marker is found.
+    """
+    html = html or ""
+    m = _SUPPLY_BTN.search(html)
+    j = _SUPPLY_PRODUCT_JSON.search(html)
+    if not m and not j:
+        return None
+    json_avail = j.group(1).lower() == "true" if j else None
+    if json_avail:
+        return "in_stock"
+    if m:
+        tag, inner = m.group(1), re.sub(r"<[^>]+>", " ", m.group(2))
+        oos_attr = bool(re.search(r'data-supply-out-of-stock\s*=\s*["\']true["\']', tag, re.I))
+        if not oos_attr and not _SUPPLY_OOS_LABEL.search(inner):
+            return "in_stock"
+    return "out_of_stock"
+
+
 def disney_variation_status(data: dict | None) -> str | None:
     """Stock from Disney's Product-Variation JSON (available + readyToOrder)."""
     if not isinstance(data, dict):
@@ -1344,6 +1403,13 @@ def extract(title: str, html: str, visible: str, product: dict | None = None) ->
         status = "unknown"
     elif product_ok and not out_of_stock:
         status = "in_stock" if enabled_add or add_btn else status
+
+    if is_supply(product):
+        supply = supply_html_stock(html)
+        if supply is not None:
+            status = supply
+            out_of_stock = supply == "out_of_stock"
+            enabled_add = supply == "in_stock"
 
     if is_disney(product):
         disney = disney_html_stock(html)
@@ -2917,6 +2983,10 @@ def sleep_jitter(
         now=now, products=products, in_stock_repeat=in_stock_repeat
     )
     base = low if low == high else random.uniform(low, high)
+    if extra and is_reminder_day(now, products):
+        # Failure backoff can reach 10 minutes. On a restock day keep it short
+        # so a blocked or slow watch cannot hide the restock for long.
+        extra = min(extra, float(REMINDER_DAY_BACKOFF_CAP_S))
     total = base + extra
     log.info("sleeping %.1fs", total)
     end = time.monotonic() + total
