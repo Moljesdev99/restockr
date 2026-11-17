@@ -98,23 +98,37 @@ def check_page(product: dict | None = None, _context=None) -> dict:
     except Exception as exc:
         _reset_session(pid)
         raise RuntimeError(f"HTTP error ({pid}): {exc}") from exc
-    final_host = urlparse(str(r.url)).netloc.lower()
-    # Disney/Queue-it: when the virtual waiting room is ON we end on queue.* host
-    if final_host.startswith("queue."):
+    html = r.text or ""
+    title = core._title_from_html(html)
+    # Disney/Queue-it: when the virtual waiting room is ON we end on a queue.*
+    # host (or a Queue-it page). Each run uses a fresh session without a queue
+    # pass, so this keeps showing until the site turns the waiting room off.
+    if core.looks_like_queue(title, html if r.status_code < 400 else "", str(r.url)):
         if core.is_restock(product):
             return {"status": "queue", "queue_url": str(r.url), "product_ok": True}
         raise RuntimeError(f"Waiting-room page ({pid})")
     if r.status_code >= 400:
         _reset_session(pid)
         raise RuntimeError(f"HTTP {r.status_code} ({pid})")
-    html = r.text or ""
-    title = core._title_from_html(html)
     visible = core._visible_from_html(html)
     try:
-        return core.evaluate_page(title, html, visible, product)
+        info = core.evaluate_page(title, html, visible, product)
     except Exception:
         _reset_session(pid)
         raise
+    return core.apply_disney_variation(product, info, lambda u: _fetch_json(pid, u))
+
+
+def _fetch_json(pid: str, url: str):
+    r = _session(pid).get(
+        url,
+        timeout=20,
+        allow_redirects=True,
+        headers={"Accept": "application/json", "Accept-Language": "en-US,en;q=0.9"},
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return str(r.url), r.text or ""
 
 
 core.check_page = check_page
@@ -134,39 +148,9 @@ core.ntfy = _ntfy
 
 
 # ---------- Disney virtual queue alert ----------
-def handle_queue(cfg: dict, state: dict, product: dict, info: dict) -> None:
-    pstate = core.product_state(state, product)
-    pstate["consecutive_failures"] = 0
-    log.info("CHECK OK  product=%s  status=QUEUE (virtual waiting room is ON)", product.get("id"))
-    now = time.time()
-    last = float(pstate.get("queue_alert_ts") or 0)
-    sent = int(pstate.get("queue_alerts_sent") or 0)
-    if not pstate.get("queue_active"):
-        sent = 0
-    if sent < 3 and now - last >= 180:
-        line = "🚦 <b>The virtual waiting room is open! Join now</b>"
-        core.emit_alert(
-            cfg,
-            state,
-            product,
-            kind="queue",
-            info=info,
-            pstate=pstate,
-            event_line=line,
-            priority=5,
-            tags=["rotating_light", "shopping"],
-        )
-        pstate["queue_alerts_sent"] = sent + 1
-        pstate["queue_alert_ts"] = now
-    pstate["queue_active"] = True
-    core.save_state(state)
-
-
-def clear_queue_flag(state: dict, product: dict) -> None:
-    pstate = core.product_state(state, product)
-    if pstate.get("queue_active"):
-        pstate["queue_active"] = False
-        pstate["queue_alerts_sent"] = 0
+# Waiting-room open / over alerts live in restockr_core (handle_check), shared
+# with the box watcher.
+handle_queue = core.handle_queue
 
 
 # ---------- summary (intro / test) ----------
@@ -198,11 +182,7 @@ def run_once(cfg, state, products):
     for product in products:
         try:
             info = check_page(product)
-            if info.get("status") == "queue":
-                handle_queue(cfg, state, product, info)
-            else:
-                clear_queue_flag(state, product)
-                core.handle_result(cfg, state, product, info)
+            core.handle_check(cfg, state, product, info)
             results[product["id"]] = info
         except Exception as exc:
             extra = max(extra, core.handle_failure(cfg, state, product, f"{exc}"))

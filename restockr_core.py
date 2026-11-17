@@ -47,6 +47,15 @@ CHECK_MIN_S, CHECK_MAX_S = 60, 120
 TIGHT_CHECK_MIN_S, TIGHT_CHECK_MAX_S = 60, 75
 IN_STOCK_REPEAT_S = 120
 IN_STOCK_ALERT_MAX = 10
+# Virtual waiting room (Queue-it). The "open" alert repeats up to QUEUE_ALERT_MAX
+# times, QUEUE_ALERT_GAP_S apart, while the page keeps redirecting to the queue.
+# The "over" alert fires once, after QUEUE_END_CONFIRM reachable reads in a row
+# (so a single flaky read does not end the waiting room).
+QUEUE_ALERT_MAX = 3
+QUEUE_ALERT_GAP_S = 180
+QUEUE_END_CONFIRM = 2
+QUEUE_OPEN_LINE = "🚦 <b>The virtual waiting room is open! Join now</b>"
+QUEUE_ENDED_LINE = "✅ <b>The waiting room is over, the product page is open again</b>"
 NAV_TIMEOUT_MS = 45_000
 RENDER_WAIT_MS = 4_000
 MAX_CONSECUTIVE_FAILURES_BEFORE_WARN = 5
@@ -617,6 +626,8 @@ format_date_es = format_date
 def status_label(status: str | None, expected: str | None) -> str:
     if status == "in_stock":
         return "In stock"
+    if status == "queue":
+        return "🚦 Waiting room open"
     if status == "out_of_stock" and expected:
         return "Coming soon"
     if status == "out_of_stock":
@@ -822,7 +833,7 @@ def card_headline(
     name = product.get("name") or "Producto"
     emoji = product.get("emoji") or "🎮"
     short = product.get("short_name") or name
-    if event_line and status != "in_stock":
+    if event_line and (status != "in_stock" or event_line == QUEUE_ENDED_LINE):
         head = re.sub(r"</?b>", "", event_line)
     else:
         head = f"{emoji} {name}"
@@ -861,7 +872,7 @@ def build_caption(
     lines: list[str] = []
     if test:
         lines.append(f"🧪 {_bold('Test', markup)}")
-    if status != "in_stock" and event_line:
+    if event_line and (status != "in_stock" or event_line == QUEUE_ENDED_LINE):
         # event_line is stored as HTML; convert if needed
         ev = event_line
         if markup == "md":
@@ -1093,6 +1104,95 @@ def ntfy_card(
 
 
 
+def is_disney(product: dict | None) -> bool:
+    return "disneystore." in ((product or {}).get("url") or "").lower()
+
+
+_DISNEY_OOS_BTN = re.compile(r"sold\s*out|coming\s*soon|notify\s*me|unavailable|out\s*of\s*stock", re.I)
+
+
+def disney_html_stock(html: str) -> str | None:
+    """Stock status from Disney Store (Salesforce) server-rendered markup.
+
+    Returns "in_stock", "out_of_stock", or None when the markers are missing.
+    The page always ships a hidden ``product-oos-info d-none`` template and a
+    ``data-soldOut-copy="Sold Out"`` attribute, so those alone mean nothing.
+    """
+    html = html or ""
+    buttons = re.findall(
+        r"(<button\b[^>]*\bid=[\"']add-to-cart[\"'][^>]*>)(.*?)</button>", html, re.I | re.S
+    )
+    avail_m = re.search(r"availability(?:&quot;|\")\s*:\s*(?:&quot;|\")([^\"&]+)", html, re.I)
+    avail = (avail_m.group(1) if avail_m else "").lower()
+    schema_m = re.search(
+        r"itemprop=[\"']availability[\"'][^>]*?(?:href=[\"'][^\"']*?|>\s*(?:https?://schema\.org/)?)(\w+)",
+        html,
+        re.I,
+    )
+    schema = (schema_m.group(1) if schema_m else "").lower()
+    if not buttons and not avail and not schema:
+        return None
+    btn_disabled = any(re.search(r"\sdisabled(?=[\s>=/])", tag, re.I) for tag, _ in buttons)
+    btn_oos_text = any(
+        _DISNEY_OOS_BTN.search(re.sub(r"<[^>]+>", " ", inner)) for _, inner in buttons
+    )
+    oos_visible = bool(re.search(r"class=[\"'](?![^\"']*\bd-none\b)[^\"']*\bproduct-oos-info(?![\w-])", html, re.I))
+    avail_oos = any(k in avail for k in ("out_of_stock", "out of stock", "sold", "unavailable", "not_available"))
+    avail_in = any(k in avail for k in ("in_stock", "in stock", "preorder", "pre_order", "backorder", "back_order"))
+    schema_oos = schema in ("outofstock", "soldout", "discontinued")
+    schema_in = schema in ("instock", "preorder", "backorder", "limitedavailability", "onlineonly")
+    if btn_disabled or btn_oos_text or oos_visible:
+        return "out_of_stock"
+    if buttons and not avail_oos and not schema_oos:
+        return "in_stock"
+    if avail_oos or schema_oos:
+        return "out_of_stock"
+    if avail_in or schema_in:
+        return None  # in-stock flag but no buy button: let the generic rules decide
+    return None
+
+
+def disney_variation_status(data: dict | None) -> str | None:
+    """Stock from Disney's Product-Variation JSON (available + readyToOrder)."""
+    if not isinstance(data, dict):
+        return None
+    prod = data.get("product")
+    if not isinstance(prod, dict) or "available" not in prod:
+        return None
+    if prod.get("isForceSellOutProduct"):
+        return "out_of_stock"
+    if prod.get("available") and prod.get("readyToOrder", True):
+        return "in_stock"
+    return "out_of_stock"
+
+
+def disney_variation_url(product: dict | None) -> str | None:
+    url = (product or {}).get("url") or ""
+    m = re.search(r"-(\d{6,})\.html", url)
+    if not is_disney(product) or not m:
+        return None
+    host = urllib.parse.urlparse(url).netloc or "www.disneystore.com"
+    return (
+        f"https://{host}/on/demandware.store/Sites-shopDisney-Site/default/"
+        f"Product-Variation?pid={m.group(1)}&quantity=1"
+    )
+
+
+def looks_like_queue(title: str, html: str, final_url: str = "") -> bool:
+    """True if we landed on a Queue-it style virtual waiting room."""
+    host = urllib.parse.urlparse(final_url or "").netloc.lower()
+    if host.startswith("queue.") or host.endswith("queue-it.net"):
+        return True
+    html = html or ""
+    if re.search(r"\bid=[\"']add-to-cart[\"']", html, re.I):
+        return False
+    low = html[:300000].lower()
+    t = (title or "").lower()
+    if "queue-it" in low or "queueit" in low:
+        return True
+    return any(k in t for k in ("waiting room", "virtual queue", "you are now in line", "queue-it"))
+
+
 def looks_like_challenge(title: str, html: str, visible: str, product: dict | None = None) -> bool:
     t = (title or "").lower()
     v = (visible or "").lower()
@@ -1244,6 +1344,13 @@ def extract(title: str, html: str, visible: str, product: dict | None = None) ->
         status = "unknown"
     elif product_ok and not out_of_stock:
         status = "in_stock" if enabled_add or add_btn else status
+
+    if is_disney(product):
+        disney = disney_html_stock(html)
+        if disney is not None:
+            status = disney
+            out_of_stock = disney == "out_of_stock"
+            enabled_add = disney == "in_stock"
 
     image_url = extract_image_url(html)
     price = extract_price(html, vis)
@@ -1887,8 +1994,58 @@ def check_page(product: dict | None = None, _context=None) -> dict:
         err = proc.stderr.decode("utf-8", errors="replace")[-400:]
         raise RuntimeError(f"Chrome exit {proc.returncode} ({product.get('id')}): {err}")
     title = _title_from_html(html)
+    if is_restock(product) and looks_like_queue(title, html):
+        return {"status": "queue", "product_ok": True}
     visible = _visible_from_html(html)
-    return evaluate_page(title, html, visible, product)
+    info = evaluate_page(title, html, visible, product)
+    return apply_disney_variation(product, info, _fetch_json_urllib)
+
+
+def _fetch_json_urllib(url: str):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": CHROME_UA, "Accept": "application/json", "Accept-Language": "en-US,en;q=0.9"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        final = resp.geturl()
+        body = resp.read().decode("utf-8", errors="replace")
+    return final, body
+
+
+def apply_disney_variation(product: dict, info: dict, fetch) -> dict:
+    """Confirm Disney stock with the Product-Variation JSON.
+
+    ``fetch(url) -> (final_url, body)``. If the JSON is redirected to the
+    waiting room, report the queue. Errors keep the HTML result.
+    """
+    vurl = disney_variation_url(product) if is_restock(product) else None
+    if not vurl or info.get("status") == "queue":
+        return info
+    try:
+        final, body = fetch(vurl)
+    except Exception as exc:
+        log.info("Disney variation check skipped (%s)", exc)
+        return info
+    if looks_like_queue("", body if not body.lstrip().startswith("{") else "", final):
+        return {"status": "queue", "product_ok": True}
+    try:
+        data = json.loads(body)
+    except Exception:
+        return info
+    st = disney_variation_status(data)
+    if st and st != info.get("status"):
+        log.info(
+            "Disney variation JSON says %s (HTML said %s); using JSON",
+            st,
+            info.get("status"),
+        )
+    if st:
+        info = dict(info)
+        info["status"] = st
+        info["out_of_stock"] = st == "out_of_stock"
+        info["enabled_add"] = st == "in_stock"
+        info["variation_status"] = st
+    return info
 
 
 def _channel_ready(ch: dict, now: datetime) -> bool:
@@ -2149,6 +2306,8 @@ def heartbeat_watch_status(product: dict | None, pstate: dict | None = None) -> 
     product = product or {}
     pstate = pstate or {}
     status = pstate.get("last_status")
+    if is_restock(product) and pstate.get("queue_active"):
+        status = "queue"
     if is_restock(product):
         if status == "in_stock":
             return "🟢 In stock"
@@ -2631,6 +2790,80 @@ def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
     maybe_specials(cfg, state, product, pstate, status)
 
 
+def handle_queue(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    """The page redirected to the virtual waiting room."""
+    pstate = product_state(state, product)
+    pstate["consecutive_failures"] = 0
+    pstate["queue_clear_streak"] = 0
+    log.info("CHECK OK  product=%s  status=QUEUE (virtual waiting room is ON)", product.get("id"))
+    now = time.time()
+    if not pstate.get("queue_active"):
+        pstate["queue_active"] = True
+        pstate["queue_alerts_sent"] = 0
+        pstate["queue_alert_ts"] = 0
+        pstate["queue_since"] = now_mx().isoformat()
+    sent = int(pstate.get("queue_alerts_sent") or 0)
+    last = float(pstate.get("queue_alert_ts") or 0)
+    if sent < QUEUE_ALERT_MAX and now - last >= QUEUE_ALERT_GAP_S:
+        emit_alert(
+            cfg,
+            state,
+            product,
+            kind="queue",
+            info={**info, "status": "queue"},
+            pstate=pstate,
+            event_line=QUEUE_OPEN_LINE,
+            priority=5,
+            tags=["rotating_light", "shopping"],
+        )
+        pstate["queue_alerts_sent"] = sent + 1
+        pstate["queue_alert_ts"] = now
+    save_state(state)
+
+
+def note_page_reachable(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    """The real product page loaded. End an active waiting room once confirmed."""
+    pstate = product_state(state, product)
+    if not pstate.get("queue_active"):
+        pstate["queue_clear_streak"] = 0
+        return
+    streak = int(pstate.get("queue_clear_streak") or 0) + 1
+    pstate["queue_clear_streak"] = streak
+    # In stock ends it right away; otherwise wait for a second reachable read.
+    if streak < QUEUE_END_CONFIRM and info.get("status") != "in_stock":
+        log.info("Waiting room may be over (%s/%s reachable reads)", streak, QUEUE_END_CONFIRM)
+        save_state(state)
+        return
+    log.info("Waiting room is over for %s (page status=%s)", product.get("id"), info.get("status"))
+    emit_alert(
+        cfg,
+        state,
+        product,
+        kind="queue_ended",
+        info=info,
+        pstate=pstate,
+        event_line=QUEUE_ENDED_LINE,
+        priority=5,
+        tags=["white_check_mark", "shopping"],
+    )
+    pstate["queue_active"] = False
+    pstate["queue_alerts_sent"] = 0
+    pstate["queue_alert_ts"] = 0
+    pstate["queue_clear_streak"] = 0
+    pstate["queue_ended_at"] = now_mx().isoformat()
+    save_state(state)
+
+
+def handle_check(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    """Route one successful check: waiting room, waiting room over, stock."""
+    if info.get("status") == "queue":
+        handle_queue(cfg, state, product, info)
+        return
+    if is_restock(product):
+        note_page_reachable(cfg, state, product, info)
+    handle_result(cfg, state, product, info)
+
+
 def handle_failure(cfg: dict, state: dict, product: dict, err: str) -> float:
     pstate = product_state(state, product)
     n = int(pstate.get("consecutive_failures") or 0) + 1
@@ -2687,8 +2920,10 @@ def sleep_jitter(
     total = base + extra
     log.info("sleeping %.1fs", total)
     end = time.monotonic() + total
-    while time.monotonic() < end and not _stop:
-        time.sleep(min(1.0, end - time.monotonic()))
+    wall_end = time.time() + total
+    # Guard against monotonic clock jumps (box suspend/restore): also stop on wall clock.
+    while time.monotonic() < end and time.time() < wall_end and not _stop:
+        time.sleep(max(0.0, min(1.0, end - time.monotonic(), wall_end - time.time())))
 
 
 def on_signal(signum, _frame) -> None:
@@ -2758,7 +2993,7 @@ def main() -> int:
                     break
                 try:
                     info = check_page(product)
-                    handle_result(cfg, state, product, info)
+                    handle_check(cfg, state, product, info)
                     last_results[product["id"]] = info
                 except Exception as exc:
                     extra = max(extra, handle_failure(cfg, state, product, f"{exc}"))
