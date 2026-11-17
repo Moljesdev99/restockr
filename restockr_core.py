@@ -65,6 +65,8 @@ ALERT_MODE_KEEP, ALERT_MODE_BOUGHT, ALERT_MODE_SKIP = "keep", "bought", "skip"
 MUTED_MODES = (ALERT_MODE_BOUGHT, ALERT_MODE_SKIP)
 # Alert kinds that get the Bought it / Not buying / Keep alerting buttons.
 CONTROL_KINDS = ("in_stock", "queue", "queue_ended")
+# Product id used by the buttons of a test card; taps on it change nothing.
+TEST_CALLBACK_ID = "restockr-test"
 # Virtual waiting room (Queue-it). The "open" alert repeats up to QUEUE_ALERT_MAX
 # times, QUEUE_ALERT_GAP_S apart, while the page keeps redirecting to the queue.
 # The "over" alert fires once, after QUEUE_END_CONFIRM reachable reads in a row
@@ -744,6 +746,12 @@ def handle_callback(state: dict, products: list[dict], cq: dict) -> None:
         _answer_callback(cq.get("id"), "Unknown button")
         return
     action, token = parts[1], parts[2]
+    if token == TEST_CALLBACK_ID:
+        # Buttons on a "[TEST]" card: confirm the tap without touching any watch.
+        labels = {"b": "Bought it", "s": "Not buying", "k": "Keep alerting", "r": "Resume", "n": "status"}
+        log.info("Test button tap received: %s", labels[action])
+        _answer_callback(cq.get("id"), f"🧪 Test OK: “{labels[action]}” received. No watch was changed.")
+        return
     product = _find_product(products, token)
     if not product:
         _answer_callback(cq.get("id"), "This watch is no longer in the config.")

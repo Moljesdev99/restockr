@@ -250,3 +250,12 @@ def test_poll_tolerates_errors(env, monkeypatch):
         raise OSError("network down")
     monkeypatch.setattr(core, "_tg_post", boom)
     assert core.poll_telegram(force=True) == 0
+
+
+def test_test_card_taps_change_nothing(env):
+    fake, state, cfg = env
+    tap(fake, 1, "b", pid=core.TEST_CALLBACK_ID)
+    core.poll_telegram(force=True)
+    assert core.alert_mode(state, PROD) is None
+    ans = [f for m, f in fake.calls if m == "answerCallbackQuery"][-1]
+    assert "Test OK" in ans["text"]
