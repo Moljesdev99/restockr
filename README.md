@@ -304,7 +304,7 @@ Never put these values in `config.json`, in the README, or in a commit message.
 
 In your repository, open `config.json` → the pencil icon. Start from [`config.example.json`](config.example.json) or from one of the use-case snippets above. Then click **Commit changes**.
 
-This repository’s live `config.json` includes the two restock products the project was originally tested with (Chromatic Codex and the Disney lightsaber). Replace them with yours when you use your own copy.
+This repository’s live `config.json` includes the restock products the project was originally tested with: the Game Boy Chromatic Codex (`chromatic`) and the ModRetro Chromatic Case Codex Edition (`chromatic-case`), both on OpenAI Supply Co., and the Disney Ezra Legacy Lightsaber Set (`disney-ezra`). Each has its own alert buttons and `/reset <id>`. Replace them with yours when you use your own copy.
 
 ### 7. Enable GitHub Actions and run a test
 

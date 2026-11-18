@@ -13,6 +13,15 @@
       "timezone": "America/Mexico_City"
     },
     {
+      "id": "chromatic-case",
+      "name": "ModRetro Chromatic Case Codex Edition",
+      "short_name": "the Chromatic Case",
+      "url": "https://openai.com/supply/product/modretro-chromatic-case-codex-edition/",
+      "emoji": "🧳",
+      "is_test": false,
+      "primary": false
+    },
+    {
       "id": "disney-ezra",
       "name": "Ezra Legacy Lightsaber Set",
       "short_name": "the Ezra Legacy Lightsaber Set",

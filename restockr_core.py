@@ -2731,13 +2731,13 @@ def _heartbeat_remind_at(product: dict) -> datetime | None:
         return None
 
 
-def heartbeat_button_label(product: dict | None) -> str:
+def heartbeat_button_label(product: dict | None, words: int = 1) -> str:
     """Short inline-keyboard label, e.g. '🎮 Open Chromatic'."""
     product = product or {}
     emoji = product.get("emoji") or "🔗"
     name = heartbeat_display_name(product)
-    words = name.split()
-    short = words[0] if words else "page"
+    parts = name.split()
+    short = " ".join(parts[: max(1, words)]) if parts else "page"
     return f"{emoji} Open {short}"
 
 
@@ -2758,11 +2758,19 @@ def build_heartbeat_keyboard(
     """Inline URL buttons, up to two per row, one per watched page."""
     rows: list[list[dict]] = []
     row: list[dict] = []
-    for product in _heartbeat_products(cfg, fallback_product):
+    products = [p for p in _heartbeat_products(cfg, fallback_product) if p.get("url")]
+    labels = [heartbeat_button_label(p) for p in products]
+    # Two watches can share a first word ("Chromatic Codex" / "Chromatic Case"):
+    # use two words for those so the buttons stay distinguishable.
+    for i, product in enumerate(products):
+        if labels.count(labels[i]) > 1 or any(
+            heartbeat_display_name(o).split()[:1] == heartbeat_display_name(product).split()[:1]
+            for o in products if o is not product
+        ):
+            labels[i] = heartbeat_button_label(product, words=2)
+    for product, label in zip(products, labels):
         url = product.get("url")
-        if not url:
-            continue
-        row.append({"text": heartbeat_button_label(product), "url": str(url)})
+        row.append({"text": label, "url": str(url)})
         if len(row) == 2:
             rows.append(row)
             row = []

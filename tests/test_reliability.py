@@ -442,7 +442,7 @@ def test_existing_restock_config_still_parses():
     raw = json.loads((ROOT / "config.json").read_text())
     parsed = core.parse_config({"topic": "t", **raw}, require_topic=False)
     ids = [p["id"] for p in parsed["products"]]
-    assert ids == ["chromatic", "disney-ezra"]
+    assert ids == ["chromatic", "chromatic-case", "disney-ezra"]
     assert all(p["type"] == "restock" for p in parsed["products"])
 
 

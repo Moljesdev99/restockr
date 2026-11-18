@@ -172,7 +172,7 @@ class TestRestockRegression(unittest.TestCase):
     def test_live_config_defaults_to_restock(self):
         raw = json.loads((ROOT / "config.json").read_text())
         ids = [p["id"] for p in raw["products"]]
-        self.assertEqual(ids, ["chromatic", "disney-ezra"])
+        self.assertEqual(ids, ["chromatic", "chromatic-case", "disney-ezra"])
         self.assertTrue(all(not p.get("type") or p.get("type") in ("restock", "product") for p in raw["products"]))
 
 
