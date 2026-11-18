@@ -2478,8 +2478,11 @@ def enqueue_alert(
     """Queue an alert. Not marked delivered until each channel succeeds.
 
     If an event of the same watch+kind is already pending, its payload is
-    updated to the latest values (coalesced) without resetting a channel
-    that already succeeded.
+    updated to the latest values (coalesced). A channel that already
+    delivered the earlier copy is set back to pending: this is a new alert
+    (e.g. the next in-stock repeat) and must go out again even while another
+    channel (ntfy 429) is still retrying. Channels still retrying keep their
+    backoff.
     """
     if TEST_MODE:
         return None
@@ -2539,6 +2542,14 @@ def enqueue_alert(
                 for key in ("event_line", "info", "pstate", "product", "text", "title", "priority", "tags", "use_card", "is_test", "reply_markup", "alert_mode"):
                     existing[key] = event[key]
                 existing["updated_ts"] = event["created_ts"]
+                chans = existing.setdefault("channels", {})
+                for name, fresh in event["channels"].items():
+                    ch = chans.get(name)
+                    if not ch or ch.get("status") == "sent" or fresh.get("status") == "skipped":
+                        chans[name] = dict(fresh)
+                    elif int(ch.get("attempts") or 0) >= DELIVERY_MAX_ATTEMPTS:
+                        # Exhausted: give the new alert a fresh set of tries.
+                        chans[name] = dict(fresh)
                 log.info("Coalesced pending event watch=%s kind=%s", event["watch_id"], kind)
                 save_state(state)
                 return existing
@@ -2642,7 +2653,15 @@ def flush_pending(cfg: dict, state: dict, products: list[dict] | None = None) ->
                 event.get("kind"),
                 ch["attempts"],
             )
-        if all((channels.get(n) or {}).get("status") in ("sent", "skipped") for n in ("telegram", "ntfy")):
+        def _done(ch: dict) -> bool:
+            return ch.get("status") in ("sent", "skipped") or (
+                ch.get("status") == "failed" and int(ch.get("attempts") or 0) >= DELIVERY_MAX_ATTEMPTS
+            )
+        if all(_done(channels.get(n) or {}) for n in ("telegram", "ntfy")):
+            if any((channels.get(n) or {}).get("status") == "failed" for n in ("telegram", "ntfy")):
+                log.warning("Giving up on %s/%s for a failed channel after %s attempts",
+                            event.get("watch_id"), event.get("kind"), DELIVERY_MAX_ATTEMPTS)
+                changed = True
             continue
         still.append(event)
     if changed or len(still) != len(pending):
@@ -2864,7 +2883,11 @@ def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: 
                 remind_at = remind_at.replace(tzinfo=TZ)
         except ValueError:
             remind_at = None
-    if remind_at and n >= remind_at:
+    # The box backup sets "daily_notices": false in its local config so the
+    # reminder and the daily heartbeat come from the cloud watcher only (one
+    # copy each). Stock alerts are still sent by both watchers.
+    notices = (cfg or {}).get("daily_notices", True) is not False
+    if remind_at and n >= remind_at and notices:
         day = remind_at.date().isoformat()
         if pstate.get("reminder_sent_on") != day:
             line = (
@@ -2891,7 +2914,8 @@ def maybe_specials(cfg: dict, state: dict, product: dict, pstate: dict, status: 
         hour=HEARTBEAT_HOUR, minute=HEARTBEAT_MINUTE, second=0, microsecond=0
     )
     if (
-        product.get("primary")
+        notices
+        and product.get("primary")
         and n >= heartbeat_at
         and today not in state.get("heartbeat_dates", [])
         and status != "in_stock"

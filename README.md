@@ -57,6 +57,8 @@ Existing restock entries keep working if you omit `type` (it defaults to `restoc
 | `price_below` | An extracted price is at or below `threshold` | Flights, hotels, products — **if the price is in the HTML** |
 | `changed` | The text of the page (or of a `selector`) changes compared with the last check | Release-date pages, any “tell me if this changes” use |
 
+Top-level option: `"daily_notices": false` stops a second copy of the watcher (for example a backup on another machine that shares the same bot) from sending the restock-day reminder and the daily heartbeat. Stock alerts are still sent.
+
 Common fields on every entry: `id`, `name`, `url`, `type`, `emoji`, optional `image` / `image_url`, optional `cooldown` (seconds), optional `is_test` (prefix alerts with 🧪 Test), optional `primary` (daily heartbeat; only one should be true), optional `button_text`.
 
 Optional reminder (only if you set it; nothing is hard-coded to a product or date):
