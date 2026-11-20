@@ -183,6 +183,7 @@ def run_once(cfg, state, products):
     extra = 0.0
     core.set_poll_context(cfg, state, products)
     core.poll_telegram(force=True)
+    core.tick_media_watches(cfg, state, products)
     for product in products:
         if not core.should_check(state, product):
             continue

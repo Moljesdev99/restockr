@@ -56,10 +56,13 @@ Existing restock entries keep working if you omit `type` (it defaults to `restoc
 | `text_disappears` | A string or regex is no longer found in that same scope | “Sold out” disappearing on a hotel or event page |
 | `price_below` | An extracted price is at or below `threshold` | Flights, hotels, products — **if the price is in the HTML** |
 | `changed` | The text of the page (or of a `selector`) changes compared with the last check | Release-date pages, any “tell me if this changes” use |
+| `media` | An official US theatrical or streaming date is 10 days away, or a new official calendar date appears on the title’s official page | Movies, anime, and series premieres |
 
 Top-level option: `"daily_notices": false` stops a second copy of the watcher (for example a backup on another machine that shares the same bot) from sending the restock-day reminder and the daily heartbeat. Stock alerts are still sent.
 
-Common fields on every entry: `id`, `name`, `url`, `type`, `emoji`, optional `image` / `image_url`, optional `cooldown` (seconds), optional `is_test` (prefix alerts with 🧪 Test), optional `primary` (daily heartbeat; only one should be true), optional `button_text`.
+Common fields on every entry: `id`, `name`, `url`, `type`, `emoji`, optional `image` / `image_url` (a URL or a path in this repo such as `assets/media/poster.jpg`), optional `cooldown` (seconds), optional `is_test` (prefix alerts with 🧪 Test), optional `primary` (daily heartbeat; only one should be true), optional `button_text`.
+
+**`media` watches** track official US release dates. Confirmed dates go in `releases` (`date` as `YYYY-MM-DD`, plus a `label` such as `US theaters` or `US streaming`, and an optional `platform`). Ten days before each of those dates, at 09:00 Paraguay time (`America/Asuncion`, labeled PYT), Restockr sends an image card reminder. If `watch_dates` is true (the default), it also reads the official page about once an hour (cooldown is never shorter than 3600 seconds) and alerts when a new official calendar date appears, then schedules the same 10-day reminder for that date. The first page check only records a baseline and does not alert. Optional `expected_months` (for example `"2027-02"`) help it treat a more specific day in that month as official. Optional `us_theatrical` / `us_streaming` strings are shown on the card when a full date is not known yet (for example `February 2027 on Netflix (exact day TBA)`). Set `format` to `series` to skip the theaters line. Cards use **✅ Got it** / **🚫 Not interested** / **🔔 Keep alerting** (not the restock Bought it labels).
 
 Optional reminder (only if you set it; nothing is hard-coded to a product or date):
 
@@ -131,6 +134,27 @@ For a release date that may be filled in later, watch just that section for any 
 ```
 
 Streaming catalogs (Netflix, Disney+, and similar) often build the page with JavaScript or block automated requests. Prefer the studio’s official page or a public API/HTML listing when you can.
+
+For a movie or series with official US dates (and/or a page to watch until a date is announced), use `type: media` instead of a raw `changed` watch. Example:
+
+```json
+{
+  "id": "example-movie",
+  "name": "Example movie",
+  "url": "https://www.example.com/movie",
+  "emoji": "🎬",
+  "type": "media",
+  "format": "film",
+  "image": "assets/media/poster.jpg",
+  "description": "A short official description.",
+  "button_text": "🔗 Official page",
+  "watch_dates": true,
+  "releases": [
+    {"id": "us-theatrical", "label": "US theaters", "date": "2027-06-30"}
+  ],
+  "us_streaming": "TBA"
+}
+```
 
 ### Flight price drop
 
@@ -217,6 +241,8 @@ A full starter file is in [`config.example.json`](config.example.json).
 | 🟢 Price is US$180.00 (threshold US$200.00) | `price_below` |
 | 🔔 The page content changed | `changed` |
 | ⏰ Restock is today / Today is the expected date | Only if that watch has `remind_on` (or `expected_date` + `reminder`) and that date has been reached |
+| ⏰ N days until US theaters / US streaming (date) | `media`: 10 days before a confirmed US date, at 09:00 PYT, as an image card |
+| 📅 Official date announced | `media`: a new official calendar date appeared on the official page |
 | 🟢 Restockr is running | Daily heartbeat listing every active watch, with a button to open each page (if the primary restock item is not in stock) |
 | ⚠️ I could not read … N times in a row | 5 consecutive failures (possible block). It keeps retrying, with longer waits |
 | ✅ Watcher recovered | It could read the page again after that block |
@@ -235,7 +261,15 @@ In-stock, waiting-room-open, and waiting-room-over cards for a `restock` watch c
 
 If you do not tap anything, alerts keep repeating every 2 minutes, up to 30 times per restock.
 
-A muted watch stays muted (also across restocks) until you tap **↩️ Resume** or send `/reset <id>` (or `/reset all`). It is then only read every 30 minutes, so the daily heartbeat stays accurate without using a check every minute. Other watches are not affected.
+A muted watch stays muted (also across restocks) until you tap **↩️ Resume** or send `/reset <id>` (or `/reset all`). A muted restock watch is then only read every 30 minutes, so the daily heartbeat stays accurate without using a check every minute. Other watches are not affected.
+
+Reminder and “official date announced” cards for a `media` watch carry the same three actions with movie/series wording:
+
+| Button | Effect |
+|---|---|
+| **✅ Got it** | Stops further alerts for that title. The card changes to “✅ Got it — alerts off” with a **↩️ Resume** button |
+| **🚫 Not interested** | Same as above, recorded as skipped |
+| **🔔 Keep alerting** | Keep sending the 10-day reminders and official-date alerts for that title |
 
 Commands you can send to the bot: `/status` (each watch, its status and alert mode) and `/reset <id|all>` (alias `/unmute`). Only messages from your `TG_CHAT` are accepted.
 

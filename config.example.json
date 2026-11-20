@@ -5,7 +5,7 @@
       "name": "Product name",
       "short_name": "the product",
       "url": "https://store.example.com/product",
-      "emoji": "🎮",
+      "emoji": "\ud83c\udfae",
       "type": "restock",
       "is_test": false,
       "primary": true,
@@ -17,7 +17,7 @@
       "id": "movie-tickets",
       "name": "Movie tickets",
       "url": "https://www.example.com/movie",
-      "emoji": "🎟️",
+      "emoji": "\ud83c\udf9f\ufe0f",
       "type": "text_appears",
       "text": "Buy tickets",
       "cooldown": 3600
@@ -26,7 +26,7 @@
       "id": "hotel-available",
       "name": "Hotel night",
       "url": "https://www.example.com/hotel",
-      "emoji": "🏨",
+      "emoji": "\ud83c\udfe8",
       "type": "text_disappears",
       "text": "Sold out",
       "cooldown": 3600
@@ -35,7 +35,7 @@
       "id": "flight-price",
       "name": "Flight price",
       "url": "https://www.example.com/flight",
-      "emoji": "✈️",
+      "emoji": "\u2708\ufe0f",
       "type": "price_below",
       "threshold": 400,
       "currency": "USD",
@@ -46,10 +46,30 @@
       "id": "release-page",
       "name": "Release date page",
       "url": "https://www.example.com/release",
-      "emoji": "📅",
+      "emoji": "\ud83d\udcc5",
       "type": "changed",
       "selector": "#release-date",
       "cooldown": 1800
+    },
+    {
+      "id": "movie-premiere",
+      "name": "Example movie",
+      "url": "https://www.example.com/movie",
+      "emoji": "\ud83c\udfac",
+      "type": "media",
+      "format": "film",
+      "image": "assets/media/poster.jpg",
+      "description": "A short official description.",
+      "button_text": "\ud83d\udd17 Official page",
+      "watch_dates": true,
+      "releases": [
+        {
+          "id": "us-theatrical",
+          "label": "US theaters",
+          "date": "2027-06-30"
+        }
+      ],
+      "us_streaming": "TBA"
     }
   ]
 }

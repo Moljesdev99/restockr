@@ -30,5 +30,147 @@
       "is_test": false,
       "primary": false
     }
+  ],
+  "watches": [
+    {
+      "id": "zelda-movie",
+      "name": "The Legend of Zelda",
+      "short_name": "Zelda",
+      "url": "https://www.nintendo.com/us/movies/the-legend-of-zelda/",
+      "emoji": "🗡️",
+      "type": "media",
+      "format": "film",
+      "image": "assets/media/zelda.png",
+      "description": "A live-action adventure through Hyrule, from Nintendo and Sony Pictures.",
+      "button_text": "🔗 Official page",
+      "timezone": "America/Asuncion",
+      "watch_dates": true,
+      "releases": [
+        {
+          "id": "us-theatrical",
+          "label": "US theaters",
+          "date": "2027-04-30"
+        }
+      ],
+      "us_streaming": "TBA"
+    },
+    {
+      "id": "chainsaw-man-assassins",
+      "name": "Chainsaw Man: Assassins Arc",
+      "short_name": "Chainsaw Man: Assassins Arc",
+      "url": "https://chainsawman.dog/assassin/",
+      "emoji": "⛓️",
+      "type": "media",
+      "format": "film",
+      "image": "assets/media/chainsaw-man.jpg",
+      "description": "After the Reze movie, Denji's heart is the prize — and a new wave of international assassins is closing in.",
+      "button_text": "🎬 Official page",
+      "timezone": "America/Asuncion",
+      "watch_dates": true
+    },
+    {
+      "id": "the-one-piece",
+      "name": "THE ONE PIECE",
+      "short_name": "THE ONE PIECE",
+      "url": "https://www.netflix.com/tudum/articles/the-one-piece-release-date",
+      "emoji": "🏴‍☠️",
+      "type": "media",
+      "format": "series",
+      "image": "assets/media/the-one-piece.jpg",
+      "description": "WIT Studio restarts Luffy's journey from the East Blue — a brand-new anime remake, not the live-action series. Seven episodes, all at once, only on Netflix.",
+      "button_text": "🔗 Official page",
+      "timezone": "America/Asuncion",
+      "watch_dates": true,
+      "expected_months": [
+        "2027-02"
+      ],
+      "us_streaming": "February 2027 on Netflix (exact day TBA)"
+    },
+    {
+      "id": "one-piece-film-god-valley",
+      "name": "ONE PIECE FILM GOD VALLEY",
+      "short_name": "ONE PIECE FILM GOD VALLEY",
+      "url": "https://www.onepiece-film.jp/",
+      "emoji": "🌅",
+      "type": "media",
+      "format": "film",
+      "image": "assets/media/god-valley.png",
+      "description": "The next theatrical ONE PIECE film, officially heading to Japanese theaters in Summer 2027. No official US date yet.",
+      "button_text": "🔗 Official page",
+      "timezone": "America/Asuncion",
+      "watch_dates": true
+    },
+    {
+      "id": "shrek-5",
+      "name": "Shrek 5",
+      "short_name": "Shrek 5",
+      "url": "https://www.youtube.com/watch?v=MT6oamBs4Pg",
+      "emoji": "🧅",
+      "type": "media",
+      "format": "film",
+      "image": "assets/media/shrek-5.jpg",
+      "description": "The swamp crew is back. Shrek, Donkey, and Fiona return, now with their kids in tow, for a new DreamWorks adventure.",
+      "button_text": "🎬 Watch trailer",
+      "timezone": "America/Asuncion",
+      "watch_dates": true,
+      "releases": [
+        {
+          "id": "us-theatrical",
+          "label": "US theaters",
+          "date": "2027-06-30"
+        }
+      ],
+      "us_streaming": "TBA"
+    },
+    {
+      "id": "narnia",
+      "name": "Narnia: The Magician's Nephew",
+      "short_name": "Narnia: The Magician's Nephew",
+      "url": "https://www.youtube.com/watch?v=gDJ-ini7fF0",
+      "emoji": "🦁",
+      "type": "media",
+      "format": "film",
+      "image": "assets/media/narnia.jpg",
+      "description": "Greta Gerwig opens the door to Narnia at the very beginning — a world sung into being, long before the wardrobe.",
+      "button_text": "🎬 Watch trailer",
+      "timezone": "America/Asuncion",
+      "watch_dates": false,
+      "releases": [
+        {
+          "id": "us-theatrical",
+          "label": "US theaters",
+          "date": "2027-02-12"
+        },
+        {
+          "id": "us-streaming",
+          "label": "US streaming",
+          "date": "2027-04-02",
+          "platform": "Netflix"
+        }
+      ]
+    },
+    {
+      "id": "harry-potter",
+      "name": "Harry Potter and the Philosopher's Stone",
+      "short_name": "Harry Potter (HBO series)",
+      "url": "https://www.harrypotter.com/news/watch-the-new-teaser-trailer-for-hbo-original-series-harry-potter-and-the-philosophers-stone",
+      "emoji": "⚡",
+      "type": "media",
+      "format": "series",
+      "image": "assets/media/harry-potter.jpg",
+      "description": "A new generation steps onto Platform 9¾. HBO's series retells the first year at Hogwarts, faithful to the book and built for a longer story.",
+      "button_text": "🎬 Watch trailer",
+      "timezone": "America/Asuncion",
+      "watch_dates": false,
+      "releases": [
+        {
+          "id": "us-premiere",
+          "label": "US streaming",
+          "date": "2026-12-25",
+          "platform": "HBO Max"
+        }
+      ],
+      "us_streaming": "December 25, 2026 on HBO and HBO Max"
+    }
   ]
 }

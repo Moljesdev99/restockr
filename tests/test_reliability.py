@@ -442,8 +442,19 @@ def test_existing_restock_config_still_parses():
     raw = json.loads((ROOT / "config.json").read_text())
     parsed = core.parse_config({"topic": "t", **raw}, require_topic=False)
     ids = [p["id"] for p in parsed["products"]]
-    assert ids == ["chromatic", "chromatic-case", "disney-ezra"]
-    assert all(p["type"] == "restock" for p in parsed["products"])
+    assert ids[:3] == ["chromatic", "chromatic-case", "disney-ezra"]
+    restock = [p for p in parsed["products"] if p["type"] == "restock"]
+    assert [p["id"] for p in restock] == ["chromatic", "chromatic-case", "disney-ezra"]
+    media = [p for p in parsed["products"] if p["type"] == "media"]
+    assert {p["id"] for p in media} >= {
+        "zelda-movie",
+        "chainsaw-man-assassins",
+        "the-one-piece",
+        "one-piece-film-god-valley",
+        "shrek-5",
+        "narnia",
+        "harry-potter",
+    }
 
 
 # --- Check interval on reminder days ----------------------------------------

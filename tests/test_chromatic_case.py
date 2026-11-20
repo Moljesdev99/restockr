@@ -93,4 +93,5 @@ def test_heartbeat_lists_case_with_distinct_button():
     assert "🧳 Open Chromatic Case" in labels
     assert len(set(labels)) == len(labels)
     text = core.build_heartbeat_text(cfg, {}, fallback_product=None)
-    assert "3 watches active" in text and "Chromatic Case" in text
+    assert "watches active" in text and "Chromatic Case" in text
+    assert "Chromatic Codex" in text

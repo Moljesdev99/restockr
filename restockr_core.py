@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 
 import subprocess
 
+import restockr_media as media
+
 DIR = Path(__file__).resolve().parent
 CONFIG_PATH = DIR / "config.json"
 STATE_PATH = DIR / "state.json"
@@ -67,6 +69,7 @@ MUTED_MODES = (ALERT_MODE_BOUGHT, ALERT_MODE_SKIP)
 CONTROL_KINDS = ("in_stock", "queue", "queue_ended")
 # Product id used by the buttons of a test card; taps on it change nothing.
 TEST_CALLBACK_ID = "restockr-test"
+MEDIA_CONTROL_KINDS = media.MEDIA_CONTROL_KINDS
 # Virtual waiting room (Queue-it). The "open" alert repeats up to QUEUE_ALERT_MAX
 # times, QUEUE_ALERT_GAP_S apart, while the page keeps redirecting to the queue.
 # The "over" alert fires once, after QUEUE_END_CONFIRM reachable reads in a row
@@ -176,6 +179,9 @@ GENERIC_TYPES = {
     "change": "changed",
     "hash": "changed",
     "content": "changed",
+    "media": "media",
+    "release": "media",
+    "premiere": "media",
 }
 
 
@@ -193,6 +199,10 @@ def is_restock(entry: dict | None) -> bool:
     return entry_type(entry) == "restock"
 
 
+def is_media(entry: dict | None) -> bool:
+    return entry_type(entry) == "media"
+
+
 def _param(entry: dict, *keys, default=None):
     """Read a watch parameter from params/parameters, then the entry itself."""
     params = (entry.get("params") or entry.get("parameters") or {}) if entry else {}
@@ -201,6 +211,8 @@ def _param(entry: dict, *keys, default=None):
         "type", "params", "parameters", "image", "image_url", "cooldown",
         "button_text", "remind_on", "expected_date", "reminder", "remind_at",
         "timezone", "tz",
+        "releases", "watch_dates", "reminder_days", "urls",
+        "description", "expected_months", "us_theatrical", "us_streaming", "format",
     }
     for k in keys:
         if isinstance(params, dict) and k in params and params[k] is not None:
@@ -359,7 +371,7 @@ def parse_config(cfg: dict, *, require_topic: bool = False) -> dict:
         p.setdefault("is_test", False)
         p.setdefault("primary", i == 0)
         p["type"] = entry_type(p)
-        if p["type"] not in {"restock", "text_appears", "text_disappears", "price_below", "changed"}:
+        if p["type"] not in {"restock", "text_appears", "text_disappears", "price_below", "changed", "media"}:
             raise ValueError(f"config product {i} ({p['id']}): unknown type {p.get('type')!r}")
         params = p.get("params") if isinstance(p.get("params"), dict) else None
         if params is None and isinstance(p.get("parameters"), dict):
@@ -372,6 +384,11 @@ def parse_config(cfg: dict, *, require_topic: bool = False) -> dict:
                 p["cooldown"] = int(p["cooldown"])
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"config product {i} ({p['id']}): cooldown must be seconds (integer)") from exc
+        if p["type"] == "media":
+            p["cooldown"] = media.media_check_interval(p)
+            p["releases"] = media.config_releases(p)
+            p.setdefault("watch_dates", True)
+            p["watch_dates"] = bool(p.get("watch_dates"))
         try:
             p["remind_at"] = parse_remind_at(p)
         except ValueError as exc:
@@ -618,10 +635,19 @@ def in_stock_cap(state: dict | None, product: dict | None) -> int | None:
 
 
 def should_check(state: dict, product: dict, now: float | None = None) -> bool:
-    """Muted watches are only re-read every MUTED_CHECK_S (heartbeat freshness)."""
+    """Whether this watch should fetch its page on this loop."""
+    now = time.time() if now is None else now
+    if is_media(product):
+        if not media.media_needs_page_watch(product):
+            return False
+        pstate = product_state(state, product)
+        last = float(pstate.get("last_media_check") or 0)
+        interval = float(media.media_check_interval(product))
+        if last and now - last < interval:
+            return False
+        return True
     if not is_muted(state, product):
         return True
-    now = time.time() if now is None else now
     pstate = product_state(state, product)
     last = float(pstate.get("last_muted_check") or 0)
     if now - last >= MUTED_CHECK_S:
@@ -655,16 +681,23 @@ def build_alert_keyboard(product: dict, mode: str | None = None) -> dict:
     cid = _cb_pid(str(product.get("id") or "p"))
     rows = [_url_row(product)]
     if mode in MUTED_MODES:
-        label = "✅ Bought — alerts off" if mode == ALERT_MODE_BOUGHT else "🚫 Not buying — alerts off"
+        if is_media(product):
+            label = "✅ Got it — alerts off" if mode == ALERT_MODE_BOUGHT else "🚫 Not interested — alerts off"
+        else:
+            label = "✅ Bought — alerts off" if mode == ALERT_MODE_BOUGHT else "🚫 Not buying — alerts off"
         rows.append([
             {"text": label, "callback_data": f"rs|n|{cid}"},
             {"text": "↩️ Resume", "callback_data": f"rs|r|{cid}"},
         ])
         return {"inline_keyboard": rows}
     keep = "🔔 Keep alerting ✓" if mode == ALERT_MODE_KEEP else "🔔 Keep alerting"
+    if is_media(product):
+        got, skip = "✅ Got it", "🚫 Not interested"
+    else:
+        got, skip = "✅ Bought it", "🚫 Not buying"
     rows.append([
-        {"text": "✅ Bought it", "callback_data": f"rs|b|{cid}"},
-        {"text": "🚫 Not buying", "callback_data": f"rs|s|{cid}"},
+        {"text": got, "callback_data": f"rs|b|{cid}"},
+        {"text": skip, "callback_data": f"rs|s|{cid}"},
     ])
     rows.append([{"text": keep, "callback_data": f"rs|k|{cid}"}])
     return {"inline_keyboard": rows}
@@ -732,6 +765,13 @@ _CB_TOAST = {
     "r": "↩️ Alerts are back on for {name}.",
     "n": "Alerts are off for {name}. Tap Resume to turn them back on.",
 }
+_CB_TOAST_MEDIA = {
+    "b": "✅ Got it! No more alerts for {name}.",
+    "s": "🚫 OK, alerts off for {name}.",
+    "k": "🔔 OK, I'll keep alerting you about {name}.",
+    "r": "↩️ Alerts are back on for {name}.",
+    "n": "Alerts are off for {name}. Tap Resume to turn them back on.",
+}
 _CB_MODE = {"b": ALERT_MODE_BOUGHT, "s": ALERT_MODE_SKIP, "k": ALERT_MODE_KEEP, "r": None}
 
 
@@ -748,7 +788,7 @@ def handle_callback(state: dict, products: list[dict], cq: dict) -> None:
     action, token = parts[1], parts[2]
     if token == TEST_CALLBACK_ID:
         # Buttons on a "[TEST]" card: confirm the tap without touching any watch.
-        labels = {"b": "Bought it", "s": "Not buying", "k": "Keep alerting", "r": "Resume", "n": "status"}
+        labels = {"b": "Got it", "s": "Not interested", "k": "Keep alerting", "r": "Resume", "n": "status"}
         log.info("Test button tap received: %s", labels[action])
         _answer_callback(cq.get("id"), f"🧪 Test OK: “{labels[action]}” received. No watch was changed.")
         return
@@ -759,12 +799,19 @@ def handle_callback(state: dict, products: list[dict], cq: dict) -> None:
     name = heartbeat_display_name(product)
     if action != "n":
         set_alert_mode(state, product, _CB_MODE[action])
-    _answer_callback(cq.get("id"), _CB_TOAST[action].format(name=name))
+    toasts = _CB_TOAST_MEDIA if is_media(product) else _CB_TOAST
+    _answer_callback(cq.get("id"), toasts[action].format(name=name))
     if msg.get("message_id") and action != "n":
         _edit_markup(chat_id, msg["message_id"], build_alert_keyboard(product, _CB_MODE[action]))
 
 
-def _mode_label(mode: str | None) -> str:
+def _mode_label(mode: str | None, product: dict | None = None) -> str:
+    if is_media(product):
+        return {
+            ALERT_MODE_BOUGHT: "✅ got it, alerts off",
+            ALERT_MODE_SKIP: "🚫 not interested, alerts off",
+            ALERT_MODE_KEEP: "🔔 keep alerting",
+        }.get(mode or "", "🔔 alerts on")
     return {
         ALERT_MODE_BOUGHT: "✅ bought, alerts off",
         ALERT_MODE_SKIP: "🚫 not buying, alerts off",
@@ -780,7 +827,7 @@ def build_status_text(state: dict, products: list[dict]) -> str:
         lines.append(
             f"{p.get('emoji') or '•'} <b>{htmlmod.escape(heartbeat_display_name(p))}</b> "
             f"(<code>{htmlmod.escape(str(p.get('id')))}</code>): "
-            f"{htmlmod.escape(heartbeat_watch_status(p, ps))} · {_mode_label(ps.get('alert_mode'))}"
+            f"{htmlmod.escape(heartbeat_watch_status(p, ps))} · {_mode_label(ps.get('alert_mode'), p)}"
         )
     lines += ["", "/reset &lt;id|all&gt; turns alerts back on."]
     return "\n".join(lines)
@@ -967,6 +1014,14 @@ def status_label(status: str | None, expected: str | None) -> str:
         return "Content changed"
     if status == "ambiguous":
         return "Ambiguous (no alert)"
+    if status in ("watching", "idle") and expected is None:
+        return "Watching for official US dates"
+    if status == "date_found":
+        return "Official date announced"
+    if status == "reminder":
+        return "Reminder"
+    if status == "coming_soon":
+        return "Coming soon"
     return "To be confirmed"
 
 
@@ -1209,16 +1264,27 @@ def build_caption(
     if description:
         lines.append(f"✨ {_esc(description, markup)}")
     lines.append("")
-    lines.append(f"📦 {_bold('Status:', markup)} {_esc(estado, markup)}")
-    if restock and status != "in_stock":
-        if fecha:
-            lines.append(f"📅 {_bold('Expected date:', markup)} {_esc(fecha, markup)}")
-        else:
-            lines.append(f"📅 {_bold('Expected date:', markup)} To be confirmed")
-    if price and price != "To be confirmed":
-        lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")
-    elif restock:
-        lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")
+    if is_media(product):
+        releases = media.merged_releases(product, state if isinstance(state, dict) else None)
+        for raw_line in media.us_lines(releases, product):
+            # "🇺🇸 US theaters: April 30, 2027"
+            if ":" in raw_line:
+                prefix, rest = raw_line.split(":", 1)
+                lines.append(f"{prefix}: {_esc(rest.strip(), markup)}" if markup != "html" else f"{htmlmod.escape(prefix)}: {htmlmod.escape(rest.strip())}")
+            else:
+                lines.append(_esc(raw_line, markup))
+        lines.append(f"📦 {_bold('Status:', markup)} {_esc(estado if status not in (None, 'watching', 'idle') else 'Watching for official US dates', markup)}")
+    else:
+        lines.append(f"📦 {_bold('Status:', markup)} {_esc(estado, markup)}")
+        if restock and status != "in_stock":
+            if fecha:
+                lines.append(f"📅 {_bold('Expected date:', markup)} {_esc(fecha, markup)}")
+            else:
+                lines.append(f"📅 {_bold('Expected date:', markup)} To be confirmed")
+        if price and price != "To be confirmed":
+            lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")
+        elif restock:
+            lines.append(f"💵 {_bold('Price:', markup)} {_esc(price, markup)}")
     lines.append("")
     lines.append(f"🔗 {url}")
     return "\n".join(lines)
@@ -1244,6 +1310,21 @@ def entry_image(product: dict | None = None, info: dict | None = None, pstate: d
         or product.get("image_url")
         or pstate.get("product_image_url")
     )
+
+
+def _local_image_bytes(ref: str | None) -> tuple[bytes | None, str | None]:
+    """Load a poster from the repo (assets/...) or an absolute path."""
+    if not ref or str(ref).startswith(("http://", "https://")):
+        return None, None
+    path = Path(str(ref))
+    if not path.is_absolute():
+        path = DIR / path
+    try:
+        if path.is_file() and path.stat().st_size > 500:
+            return path.read_bytes(), path.name
+    except OSError as exc:
+        log.warning("Could not read local image %s: %s", path, exc)
+    return None, None
 
 
 def _download_image(url: str) -> bytes | None:
@@ -1280,6 +1361,7 @@ def tg_send_card(
     if len(caption) > 1024:
         caption = caption[:1020] + "…"
     image_url = entry_image(product, info, state)
+    image_bytes, image_name = _local_image_bytes(image_url)
     url = product.get("url") or PRODUCT_URL
     markup = json.dumps(
         reply_markup or {"inline_keyboard": [[{"text": button_label(product), "url": url}]]},
@@ -1291,7 +1373,20 @@ def tg_send_card(
         "reply_markup": markup,
     }
     try:
-        if image_url:
+        if image_bytes:
+            try:
+                data = _tg_post(
+                    "sendPhoto",
+                    fields,
+                    file_field=("photo", image_name or "poster.jpg", image_bytes),
+                )
+                if data.get("ok"):
+                    log.info("telegram sent (photo file) product=%s", product.get("id"))
+                    return True
+                log.warning("sendPhoto(file) rejected: %s", data)
+            except Exception as exc:
+                log.warning("sendPhoto(file) failed: %s", exc)
+        if image_url and not image_bytes:
             try:
                 data = _tg_post("sendPhoto", {**fields, "photo": image_url})
                 if data.get("ok"):
@@ -2333,6 +2428,8 @@ def evaluate_page(title: str, html: str, visible: str, product: dict) -> dict:
                 f"title={title!r}, len_html={len(html)})"
             )
         return info
+    if is_media(product):
+        return media.evaluate_media(title, html, visible, product, pstate=None)
     return evaluate_generic(title, html, visible, product)
 
 
@@ -2502,7 +2599,7 @@ def enqueue_alert(
             for k in (
                 "status", "expected", "price", "price_value", "threshold",
                 "snippet", "image_url", "description", "title", "triggered",
-                "content_hash", "matched_text", "watch_type",
+                "content_hash", "matched_text", "watch_type", "new_dates", "page_dates",
             )
             if k in info
         },
@@ -2515,6 +2612,7 @@ def enqueue_alert(
             for k in (
                 "id", "name", "short_name", "url", "emoji", "type",
                 "button_text", "image", "image_url", "is_test", "primary",
+                "description", "releases", "watch_dates", "us_theatrical", "us_streaming", "format",
             )
         },
         "is_test": bool(product.get("is_test")),
@@ -2565,6 +2663,8 @@ def _send_event_channel(cfg: dict, channel: str, event: dict, product: dict) -> 
         if event.get("use_card"):
             markup = None
             if event.get("kind") in CONTROL_KINDS and is_restock(product) and product.get("id"):
+                markup = build_alert_keyboard(product, event.get("alert_mode"))
+            elif event.get("kind") in MEDIA_CONTROL_KINDS and is_media(product) and product.get("id"):
                 markup = build_alert_keyboard(product, event.get("alert_mode"))
             return bool(
                 tg_send_card(
@@ -2713,9 +2813,9 @@ def heartbeat_watch_status(product: dict | None, pstate: dict | None = None) -> 
     product = product or {}
     pstate = pstate or {}
     if pstate.get("alert_mode") == ALERT_MODE_BOUGHT:
-        return "✅ Bought (alerts off)"
+        return "✅ Got it (alerts off)" if is_media(product) else "✅ Bought (alerts off)"
     if pstate.get("alert_mode") == ALERT_MODE_SKIP:
-        return "🚫 Not buying (alerts off)"
+        return "🚫 Not interested (alerts off)" if is_media(product) else "🚫 Not buying (alerts off)"
     status = pstate.get("last_status")
     if is_restock(product) and pstate.get("queue_active"):
         status = "queue"
@@ -2726,6 +2826,22 @@ def heartbeat_watch_status(product: dict | None, pstate: dict | None = None) -> 
             return "🚦 Waiting room is open"
         if status == "out_of_stock":
             return "⏳ Not in stock yet"
+        return "👀 Watching"
+    if is_media(product):
+        if pstate.get("alert_mode") == ALERT_MODE_BOUGHT:
+            return "✅ Got it (alerts off)"
+        if pstate.get("alert_mode") == ALERT_MODE_SKIP:
+            return "🚫 Not interested (alerts off)"
+        releases = media.merged_releases(product, pstate)
+        if releases:
+            bits = []
+            for r in releases:
+                d = media.parse_iso_date(r.get("date"))
+                bits.append(f"{r.get('label') or 'US'} {media.format_us_date(d)}")
+            extra = " · watching for more dates" if media.media_needs_page_watch(product) else ""
+            return "📅 " + "; ".join(bits) + extra
+        if media.media_needs_page_watch(product):
+            return "👀 Watching official page for a US date"
         return "👀 Watching"
     if status == "triggered":
         return "🟢 Condition met"
@@ -3091,7 +3207,168 @@ def handle_generic(cfg: dict, state: dict, product: dict, info: dict) -> None:
     maybe_specials(cfg, state, product, pstate, info.get("status") or "idle")
 
 
+def maybe_media_reminders(cfg: dict, state: dict, product: dict, now=None) -> int:
+    """Send due 10-day-before US reminders (no page fetch). Returns how many were queued."""
+    if not is_media(product):
+        return 0
+    pstate = product_state(state, product)
+    due = media.due_reminders(product, pstate, now=now)
+    sent = 0
+    for release in due:
+        line = media.reminder_event_line(release, today=(now or media.now_pyt()).date() if hasattr(now or media.now_pyt(), "date") else None)
+        info = {
+            "status": "reminder",
+            "description": product.get("description"),
+            "image_url": product.get("image") or product.get("image_url"),
+        }
+        emit_alert(
+            cfg,
+            state,
+            product,
+            kind="media_reminder",
+            info=info,
+            pstate=pstate,
+            event_line=line,
+            coalesce=False,
+            priority=4,
+            tags=["alarm_clock"],
+        )
+        media.mark_reminder_sent(pstate, release["reminder_key"])
+        sent += 1
+        log.info("Media reminder queued for %s key=%s", product.get("id"), release["reminder_key"])
+    if sent:
+        sync_primary_state(state, product, pstate)
+        save_state(state)
+    return sent
+
+
+def tick_media_watches(cfg: dict, state: dict, products: list[dict], now=None) -> int:
+    """Fire due media reminders for every media watch. Safe to call every loop."""
+    total = 0
+    for product in products or []:
+        if is_media(product):
+            total += maybe_media_reminders(cfg, state, product, now=now)
+    return total
+
+
+def handle_media(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    """Apply one official-page check: baseline first, then announce new dates."""
+    pstate = product_state(state, product)
+    pstate["consecutive_failures"] = 0
+    pstate["successful_checks"] = int(pstate.get("successful_checks") or 0) + 1
+    pstate["last_media_check"] = time.time()
+    cache_product_fields(pstate, info)
+
+    # evaluate_page has no state, so decide "new" here against the baseline.
+    page_dates = list(info.get("page_dates") or [])
+    extracted = list(info.get("extracted") or [])
+    fresh = []
+    if pstate.get("media_dates_baselined"):
+        # Reconstruct a text blob from extracted snippets so keyword / month
+        # hints still apply, then filter against dates already known.
+        blob = "  ".join(
+            f"{item.get('text') or ''} {item.get('snippet') or ''}"
+            for item in extracted
+        ) or " ".join(page_dates)
+        found = media.new_official_dates(blob, product, pstate)
+        fresh = [
+            {
+                "date": item["date"].isoformat(),
+                "text": item["text"],
+                "snippet": item["snippet"],
+                "label": media.infer_label(item["snippet"], product),
+                "platform": media.infer_platform(item["snippet"], media.infer_label(item["snippet"], product)),
+            }
+            for item in found
+        ]
+
+    first = not pstate.get("media_dates_baselined")
+    if first:
+        media.baseline_page_dates(pstate, page_dates)
+        log.info(
+            "CHECK OK  product=%s  type=media  baseline dates=%s",
+            product.get("id"),
+            ",".join(page_dates) or "-",
+        )
+        if pstate.get("blocked_warning_sent"):
+            pstate["blocked_warning_sent"] = False
+        sync_primary_state(state, product, pstate)
+        save_state(state)
+        maybe_media_reminders(cfg, state, product)
+        return
+
+    # Keep the running set of dates seen on the page (so they don't re-fire).
+    merged_page = list(dict.fromkeys((pstate.get("media_page_dates") or []) + page_dates))
+    pstate["media_page_dates"] = merged_page
+
+    announced = []
+    for found in fresh or []:
+        # Skip dates already in config or previously discovered.
+        d = media.parse_iso_date(found.get("date"))
+        if not d:
+            continue
+        if any(media.parse_iso_date(r.get("date")) == d for r in media.merged_releases(product, pstate)):
+            continue
+        release = media.add_discovered(pstate, found)
+        if release:
+            announced.append({**found, **release})
+
+    log.info(
+        "CHECK OK  product=%s  type=media  new=%s  page_dates=%s",
+        product.get("id"),
+        ",".join(a.get("date") for a in announced) or "-",
+        ",".join(page_dates) or "-",
+    )
+
+    for found in announced:
+        line = media.date_found_event_line(found)
+        emit_alert(
+            cfg,
+            state,
+            product,
+            kind="media_date",
+            info={
+                "status": "date_found",
+                "description": product.get("description"),
+                "image_url": product.get("image") or product.get("image_url"),
+                "new_dates": [found],
+            },
+            pstate=pstate,
+            event_line=line,
+            coalesce=False,
+            priority=5,
+            tags=["calendar", "bell"],
+        )
+
+    if pstate.get("blocked_warning_sent"):
+        emit_alert(
+            cfg,
+            state,
+            product,
+            kind="recovered",
+            use_card=False,
+            title=f"✅ Watcher recovered ({product.get('name')})",
+            text=(
+                f"I could read “{product.get('name')}” again. "
+                f"Status: {status_label('watching', None)}."
+            ),
+            event_line=(
+                f"✅ Watcher recovered. I could read “{htmlmod.escape(product.get('name') or 'the page')}” again."
+            ),
+            priority=4,
+            tags=["white_check_mark"],
+        )
+        pstate["blocked_warning_sent"] = False
+
+    sync_primary_state(state, product, pstate)
+    save_state(state)
+    maybe_media_reminders(cfg, state, product)
+
+
 def handle_result(cfg: dict, state: dict, product: dict, info: dict) -> None:
+    if is_media(product):
+        handle_media(cfg, state, product, info)
+        return
     if not is_restock(product):
         handle_generic(cfg, state, product, info)
         return
@@ -3293,6 +3570,8 @@ def handle_failure(cfg: dict, state: dict, product: dict, err: str) -> float:
     pstate = product_state(state, product)
     n = int(pstate.get("consecutive_failures") or 0) + 1
     pstate["consecutive_failures"] = n
+    if is_media(product):
+        pstate["last_media_check"] = time.time()
     log.error(
         "CHECK FAIL  product=%s  consecutive=%s  error=%s",
         product.get("id"),
@@ -3424,6 +3703,7 @@ def main() -> int:
             flush_pending(cfg, state, products)
             extra = 0.0
             last_results: dict = {}
+            tick_media_watches(cfg, state, products)
             for product in products:
                 if _stop:
                     break
