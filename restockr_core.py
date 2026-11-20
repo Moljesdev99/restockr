@@ -213,6 +213,7 @@ def _param(entry: dict, *keys, default=None):
         "timezone", "tz",
         "releases", "watch_dates", "reminder_days", "urls",
         "description", "expected_months", "us_theatrical", "us_streaming", "format",
+        "watch_from", "check_from",
     }
     for k in keys:
         if isinstance(params, dict) and k in params and params[k] is not None:
@@ -389,6 +390,11 @@ def parse_config(cfg: dict, *, require_topic: bool = False) -> dict:
             p["releases"] = media.config_releases(p)
             p.setdefault("watch_dates", True)
             p["watch_dates"] = bool(p.get("watch_dates"))
+            try:
+                start = media.parse_watch_from(p)
+            except ValueError as exc:
+                raise ValueError(f"config product {i} ({p['id']}): {exc}") from exc
+            p["watch_from"] = start.isoformat() if start else None
         try:
             p["remind_at"] = parse_remind_at(p)
         except ValueError as exc:
@@ -638,7 +644,7 @@ def should_check(state: dict, product: dict, now: float | None = None) -> bool:
     """Whether this watch should fetch its page on this loop."""
     now = time.time() if now is None else now
     if is_media(product):
-        if not media.media_needs_page_watch(product):
+        if not media.media_page_watch_open(product, now=now):
             return False
         pstate = product_state(state, product)
         last = float(pstate.get("last_media_check") or 0)

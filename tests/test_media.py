@@ -204,24 +204,55 @@ class TestHandleMedia:
         assert "media_date" in kinds
 
 
+def _pyt_ts(year, month, day, hour=12, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=media.DISPLAY_TZ).timestamp()
+
+
 class TestShouldCheck:
-    def test_hourly_cap_and_no_fetch_when_not_watching(self):
+    def test_daily_cap_and_no_fetch_when_not_watching(self):
         entry = parsed(ZELDA)["products"][0]
+        # No watch_from in this fixture, so checks may start immediately.
         state = core.default_state()
-        assert core.should_check(state, entry, now=1_000_000) is True
-        core.product_state(state, entry)["last_media_check"] = 1_000_000
-        assert core.should_check(state, entry, now=1_000_000 + 3599) is False
-        assert core.should_check(state, entry, now=1_000_000 + 3600) is True
+        start = _pyt_ts(2026, 11, 19)
+        assert core.should_check(state, entry, now=start) is True
+        core.product_state(state, entry)["last_media_check"] = start
+        assert core.should_check(state, entry, now=start + 86399) is False
+        assert core.should_check(state, entry, now=start + 86400) is True
         narnia = parsed({
             "id": "narnia", "name": "Narnia", "url": "https://example.com/n",
             "type": "media", "watch_dates": False,
             "releases": [{"id": "t", "label": "US theaters", "date": "2027-02-12"}],
         })["products"][0]
-        assert core.should_check(core.default_state(), narnia, now=1_000_000) is False
+        assert core.should_check(core.default_state(), narnia, now=start) is False
 
-    def test_cooldown_clamped_to_hourly(self):
+    def test_cooldown_clamped_to_daily(self):
         entry = parsed({**ZELDA, "cooldown": 60})["products"][0]
-        assert entry["cooldown"] == 3600
+        assert entry["cooldown"] == 86400
+
+    def test_watch_from_delays_page_checks_not_reminders(self):
+        one = parsed({**ONE_PIECE, "watch_from": "2027-01-01"})["products"][0]
+        zelda = parsed({**ZELDA, "watch_from": "2027-03-30"})["products"][0]
+        state = core.default_state()
+        assert one["watch_from"] == "2027-01-01"
+        assert zelda["watch_from"] == "2027-03-30"
+        assert core.should_check(state, one, now=_pyt_ts(2026, 12, 31, 23, 59)) is False
+        assert core.should_check(state, one, now=_pyt_ts(2027, 1, 1, 0, 0)) is True
+        assert core.should_check(state, zelda, now=_pyt_ts(2027, 3, 29, 23, 59)) is False
+        assert core.should_check(state, zelda, now=_pyt_ts(2027, 3, 30, 0, 0)) is True
+
+        # A reminder due before watch_from still fires (page checks stay off).
+        early = {
+            "id": "early-reminder",
+            "name": "Early",
+            "url": "https://example.com/e",
+            "type": "media",
+            "watch_from": "2027-04-01",
+            "releases": [{"id": "us-theatrical", "label": "US theaters", "date": "2027-03-15"}],
+        }
+        entry = parsed(early)["products"][0]
+        assert core.should_check(core.default_state(), entry, now=_pyt_ts(2027, 3, 5, 9, 0)) is False
+        due = media.due_reminders(entry, {}, now=datetime(2027, 3, 5, 9, 0, tzinfo=media.DISPLAY_TZ))
+        assert [r["id"] for r in due] == ["us-theatrical"]
 
 
 class TestButtonsAndCaption:
@@ -267,4 +298,10 @@ class TestButtonsAndCaption:
                 continue
             img = ROOT / (p.get("image") or "")
             assert img.is_file(), p["id"]
-            assert p["cooldown"] >= 3600
+            assert p["cooldown"] >= 86400
+        by_id = {p["id"]: p for p in cfg["products"]}
+        assert by_id["the-one-piece"]["watch_from"] == "2027-01-01"
+        assert by_id["zelda-movie"]["watch_from"] == "2027-03-30"
+        assert by_id["chainsaw-man-assassins"]["watch_from"] is None
+        assert by_id["narnia"]["watch_dates"] is False
+        assert by_id["harry-potter"]["watch_dates"] is False

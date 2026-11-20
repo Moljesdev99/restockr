@@ -52,7 +52,9 @@
           "date": "2027-04-30"
         }
       ],
-      "us_streaming": "TBA"
+      "us_streaming": "TBA",
+      "watch_from": "2027-03-30",
+      "cooldown": 86400
     },
     {
       "id": "chainsaw-man-assassins",
@@ -66,7 +68,8 @@
       "description": "After the Reze movie, Denji's heart is the prize — and a new wave of international assassins is closing in.",
       "button_text": "🎬 Official page",
       "timezone": "America/Asuncion",
-      "watch_dates": true
+      "watch_dates": true,
+      "cooldown": 86400
     },
     {
       "id": "the-one-piece",
@@ -84,7 +87,9 @@
       "expected_months": [
         "2027-02"
       ],
-      "us_streaming": "February 2027 on Netflix (exact day TBA)"
+      "us_streaming": "February 2027 on Netflix (exact day TBA)",
+      "watch_from": "2027-01-01",
+      "cooldown": 86400
     },
     {
       "id": "one-piece-film-god-valley",
@@ -98,7 +103,8 @@
       "description": "The next theatrical ONE PIECE film, officially heading to Japanese theaters in Summer 2027. No official US date yet.",
       "button_text": "🔗 Official page",
       "timezone": "America/Asuncion",
-      "watch_dates": true
+      "watch_dates": true,
+      "cooldown": 86400
     },
     {
       "id": "shrek-5",
@@ -120,7 +126,8 @@
           "date": "2027-06-30"
         }
       ],
-      "us_streaming": "TBA"
+      "us_streaming": "TBA",
+      "cooldown": 86400
     },
     {
       "id": "narnia",

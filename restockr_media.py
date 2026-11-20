@@ -11,7 +11,7 @@ MEDIA_TYPES = {"media", "release", "premiere"}
 MEDIA_REMINDER_DAYS = 10
 MEDIA_REMINDER_HOUR = 9
 MEDIA_REMINDER_MINUTE = 0
-MEDIA_MIN_COOLDOWN_S = 3600
+MEDIA_MIN_COOLDOWN_S = 86400  # once a day, not more often
 MEDIA_CONTROL_KINDS = ("media_reminder", "media_date")
 # Do not treat a flood of new dates (a redesigned page) as official announcements.
 MEDIA_MAX_NEW_DATES = 2
@@ -351,6 +351,39 @@ def evaluate_media(title: str, html: str, visible: str, entry: dict, pstate: dic
 
 def media_needs_page_watch(entry: dict | None) -> bool:
     return bool((entry or {}).get("watch_dates", True))
+
+
+def parse_watch_from(entry: dict | None):
+    """Optional first day (America/Asuncion) to start fetching the official page."""
+    raw = (entry or {}).get("watch_from") or (entry or {}).get("check_from")
+    if raw in (None, ""):
+        return None
+    d = parse_iso_date(raw)
+    if not d:
+        raise ValueError(f"Invalid watch_from: {raw!r}")
+    return d
+
+
+def media_asof_date(now=None):
+    if now is None:
+        return now_pyt().date()
+    if isinstance(now, datetime):
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=DISPLAY_TZ)
+        return now.astimezone(DISPLAY_TZ).date()
+    if isinstance(now, date) and not isinstance(now, datetime):
+        return now
+    return datetime.fromtimestamp(float(now), DISPLAY_TZ).date()
+
+
+def media_page_watch_open(entry: dict | None, now=None) -> bool:
+    """True when this media watch may fetch its official page."""
+    if not media_needs_page_watch(entry):
+        return False
+    start = parse_watch_from(entry)
+    if start is None:
+        return True
+    return media_asof_date(now) >= start
 
 
 def media_check_interval(entry: dict | None) -> int:
